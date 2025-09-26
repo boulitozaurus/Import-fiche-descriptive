@@ -4,3 +4,4 @@ PyYAML
 Unidecode
 requests         # pour les appels HTTP
 argostranslate   # option A : traduction locale offline
+
