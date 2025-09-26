@@ -7,6 +7,9 @@ import streamlit as st
 from pathlib import Path
 from typing import Dict, List
 from utils.docx_parser import parse_docx_sections
+import requests
+from unidecode import unidecode
+
 
 # -------------- Config --------------
 st.set_page_config(page_title="Prototype Mapping Word -> CRM + NL", layout="wide")
@@ -14,14 +17,65 @@ st.set_page_config(page_title="Prototype Mapping Word -> CRM + NL", layout="wide
 DEFAULT_SCHEMA_PATH = Path("crm_schema.yaml")
 DEFAULT_MAPPING_PATH = Path("sample_mapping.yaml")
 
-# Sidebar: OpenAI key
-st.sidebar.header("Configuration")
-openai_key = st.sidebar.text_input("OPENAI_API_KEY (optionnel pour tester la traduction)", type="password", value=os.getenv("OPENAI_API_KEY",""))
-model_name = st.sidebar.text_input("Modèle OpenAI", value="gpt-4o-mini")
-system_prompt = st.sidebar.text_area("System prompt traduction", value=(
-    "You are a professional translator. Translate from French to Dutch (Belgium). "
-    "Preserve structure, bullet lists, tables and numbers. Keep a neutral finance tone."
-))
+# ------------------ Sidebar: Traduction ---------------
+st.sidebar.header("Traduction")
+provider = st.sidebar.selectbox(
+    "Moteur",
+    ["Local (Argos – offline)", "LibreTranslate (HTTP)", "MyMemory (HTTP)"],
+    index=0
+)
+lt_endpoint = st.sidebar.text_input("LibreTranslate endpoint", "http://localhost:5000/translate")
+
+def split_blocks(text: str):
+    # on traduit par paragraphes pour éviter de casser les listes
+    return [b for b in text.split("\n\n")]
+
+def join_blocks(blocks):
+    return "\n\n".join(blocks)
+
+@st.cache_resource(show_spinner=False)
+def _load_argos():
+    import argostranslate.package, argostranslate.translate
+    # Télécharge/installe FR->NL si absent
+    argostranslate.package.update_package_index()
+    pkgs = argostranslate.package.get_available_packages()
+    fr_nl = next((p for p in pkgs if p.from_code=="fr" and p.to_code=="nl"), None)
+    if fr_nl:
+        argostranslate.package.install_from_path(fr_nl.download())
+    return argostranslate.translate
+
+def translate_fr_to_nl(text: str) -> str:
+    if provider.startswith("Local"):
+        # Option A — 100% gratuit/offline
+        tr = _load_argos()                     # charge une fois
+        blocks = [tr.translate(b, "fr", "nl") if b.strip() else "" for b in split_blocks(text)]
+        return join_blocks(blocks)
+
+    elif provider.startswith("LibreTranslate"):
+        # Option B — API self-hostée gratuite (docker)
+        # POST {q, source, target, format}
+        blocks = []
+        for b in split_blocks(text):
+            if not b.strip():
+                blocks.append("")
+                continue
+            r = requests.post(lt_endpoint, json={"q": b, "source":"fr", "target":"nl", "format":"text"}, timeout=60)
+            r.raise_for_status()
+            blocks.append(r.json()["translatedText"])
+        return join_blocks(blocks)
+
+    else:
+        # Option C — API publique gratuite (limites/qualité variables)
+        blocks = []
+        for b in split_blocks(text):
+            if not b.strip():
+                blocks.append("")
+                continue
+            r = requests.get("https://api.mymemory.translated.net/get",
+                             params={"q": b, "langpair":"fr|nl"}, timeout=30)
+            r.raise_for_status()
+            blocks.append(r.json()["responseData"]["translatedText"])
+        return join_blocks(blocks)
 
 # -------------- Step 1: Load CRM schema --------------
 st.header("Étape 1 — Schéma des champs du CRM")
@@ -89,42 +143,15 @@ with tab_map:
 with tab_preview:
     st.write("Cliquez sur **Générer NL** pour traduire chaque champ FR.")
     if st.button("Générer NL"):
-        # lazy import
-        try:
-            import openai
-            client = openai.OpenAI(api_key=openai_key) if openai_key else None
-        except Exception as e:
-            client = None
-            st.warning(f"SDK OpenAI non disponible ou clé absente. Erreur: {e}. On simule la traduction (préfixe [NL]).")
 
         results = []
-        for f in schema.get("fields", []):
-            key = f["key"]
-            nl_key = nl_lookup.get(key)
-            text_fr = st.session_state.get(f"txt_{key}", "")
-            if not text_fr.strip():
-                results.append({"key": key, "fr": "", "nl_key": nl_key, "nl": ""})
-                continue
-
-            if client:
-                try:
-                    resp = client.chat.completions.create(
-                        model=model_name,
-                        messages=[
-                            {"role":"system","content": system_prompt},
-                            {"role":"user","content": text_fr}
-                        ],
-                        temperature=0.2,
-                    )
-                    text_nl = resp.choices[0].message.content.strip()
-                except Exception as e:
-                    text_nl = f"[NL ERREUR: {e}]"
-            else:
-                text_nl = "[NL] " + text_fr  # fallback demo
-
+        for fdef in fields:
+            key = fdef["key"]
+            nl_key = nl_key_by_key.get(key)
+            text_fr = edited_fr.get(key, "")
+            text_nl = translate_fr_to_nl(text_fr) if text_fr.strip() else ""
             results.append({"key": key, "fr": text_fr, "nl_key": nl_key, "nl": text_nl})
-
-        st.session_state["results"] = results
+        st.session_state["results_auto"] = results
 
     # Show results
     results = st.session_state.get("results")
