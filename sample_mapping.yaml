@@ -1,0 +1,18 @@
+
+# Exemple de correspondance Word -> CRM (en se basant sur les titres du Word).
+# à éditer dans l'app ou à la main si vous préférez.
+mapping:
+  "Introduction": "intro_fr"
+  "Contexte et usage des fonds": "context_fr"
+  "FACTEURS DE RISQUE": "risks_fr"
+  "PRESENTATION DE L’OPERATION": "operation_fr"
+  "Localisation": "location_fr"
+  "Administratif et Timing": "admin_timeline_fr"
+  "Marché et références": "market_refs_fr"
+  "Budget de l’opération": "budget_fr"
+  "Financement et ratios": "financing_fr"
+  "Revenus et marges": "revenues_margins_fr"
+  "Couverture des intérêts": "interest_cover_fr"
+  "Stress test": "stress_test_fr"
+  "PRESENTATION DE L’OPERATEUR": "operator_fr"
+  "FINANCES": "finances_fr"
