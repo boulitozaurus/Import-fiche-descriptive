@@ -1,5 +1,6 @@
-
 python-docx
 streamlit
 PyYAML
-openai>=1.0.0
+Unidecode
+requests         # pour les appels HTTP
+argostranslate   # option A : traduction locale offline
