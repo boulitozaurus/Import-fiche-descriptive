@@ -8,8 +8,16 @@ from pathlib import Path
 from typing import Dict, List
 from utils.docx_parser import parse_docx_sections
 import requests
-from unidecode import unidecode
-
+try:
+    from unidecode import unidecode  # si installé, on l'utilise
+except Exception:
+    import unicodedata
+    def unidecode(x: str) -> str:
+        if x is None:
+            return ""
+        # suppression des accents via NFKD (approximation d'Unidecode)
+        nfkd = unicodedata.normalize("NFKD", x)
+        return "".join(ch for ch in nfkd if not unicodedata.combining(ch))
 
 # -------------- Config --------------
 st.set_page_config(page_title="Prototype Mapping Word -> CRM + NL", layout="wide")
