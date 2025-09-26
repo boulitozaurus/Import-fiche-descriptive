@@ -9,7 +9,7 @@ from typing import Dict, List
 from utils.docx_parser import parse_docx_sections
 import requests
 try:
-    from Unidecode import Unidecode  # si installé, on l'utilise
+    from unidecode import unidecode  # si installé, on l'utilise
 except Exception:
     import unicodedata
     def unidecode(x: str) -> str:
