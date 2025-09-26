@@ -3,17 +3,17 @@
 # "key": identifiant technique (à donner à l'IT), "label": libellé lisible,
 # "nl_key": identifiant technique pour la colonne NL correspondante (si existante).
 fields:
-  - { key: "intro_fr",              nl_key: "intro_nl",              label: "Introduction" }
-  - { key: "context_fr",            nl_key: "context_nl",            label: "Contexte et usage des fonds" }
-  - { key: "risks_fr",              nl_key: "risks_nl",              label: "FACTEURS DE RISQUE" }
-  - { key: "operation_fr",          nl_key: "operation_nl",          label: "PRESENTATION DE L’OPERATION" }
-  - { key: "location_fr",           nl_key: "location_nl",           label: "Localisation" }
-  - { key: "admin_timeline_fr",     nl_key: "admin_timeline_nl",     label: "Administratif et Timing" }
-  - { key: "market_refs_fr",        nl_key: "market_refs_nl",        label: "Marché et références" }
-  - { key: "budget_fr",             nl_key: "budget_nl",             label: "Budget de l’opération" }
-  - { key: "financing_fr",          nl_key: "financing_nl",          label: "Financement et ratios" }
-  - { key: "revenues_margins_fr",   nl_key: "revenues_margins_nl",   label: "Revenus et marges" }
-  - { key: "interest_cover_fr",     nl_key: "interest_cover_nl",     label: "Couverture des intérêts" }
-  - { key: "stress_test_fr",        nl_key: "stress_test_nl",        label: "Stress test" }
-  - { key: "operator_fr",           nl_key: "operator_nl",           label: "PRESENTATION DE L’OPERATEUR" }
-  - { key: "finances_fr",           nl_key: "finances_nl",           label: "FINANCES" }
+  - { key: "description_fr",            nl_key: "description_nl",            label: "Description" }
+  - { key: "contexte_fonds_fr",         nl_key: "contexte_fonds_nl",         label: "Contexte et usage des fonds" }
+  - { key: "points_attention_fr",       nl_key: "points_attention_nl",       label: "Les points d'attention" }
+  - { key: "bonnes_raisons_fr",         nl_key: "bonnes_raisons_nl",         label: "Les bonnes raisons d'investir" }
+  - { key: "operation_presentation_fr", nl_key: "operation_presentation_nl", label: "Présentation de l'opération" }
+  - { key: "localisation_fr",           nl_key: "localisation_nl",           label: "Localisation" }
+  - { key: "planning_fr",               nl_key: "planning_nl",               label: "Planning" }
+  - { key: "marche_references_fr",      nl_key: "marche_references_nl",      label: "Marché et références" }
+  - { key: "budget_fr",                 nl_key: "budget_nl",                 label: "Budget" }
+  - { key: "operateur_presentation_fr", nl_key: "operateur_presentation_nl", label: "Présentation de l'opérateur" }
+  - { key: "track_record_fr",           nl_key: "track_record_nl",           label: "Track record" }
+  - { key: "structure_management_fr",   nl_key: "structure_management_nl",   label: "Structure et Management" }
+  - { key: "actionnariat_fr",           nl_key: "actionnariat_nl",           label: "Actionnariat" }
+  - { key: "finances_fr",               nl_key: "finances_nl",               label: "Finances" }
