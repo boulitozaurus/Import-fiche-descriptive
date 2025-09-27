@@ -11,7 +11,6 @@ def _strip_accents(x: str) -> str:
     return "".join(ch for ch in nfkd if not unicodedata.combining(ch))
 
 def _norm(s: str) -> str:
-    # lower + sans accents + apostrophe normalisée + espaces compactés
     return " ".join(_strip_accents((s or "")).lower().replace("’", "'").split())
 
 def _is_heading_style(p) -> bool:
@@ -22,10 +21,10 @@ def _looks_like_heading(text: str, paragraph, expected_map: Dict[str, str]) -> b
     t = (text or "").strip()
     if not t:
         return False
-    # 1) Si c'est exactement un des titres attendus -> heading
+    # titre exact attendu -> heading
     if _norm(t) in expected_map:
         return True
-    # 2) Sinon, si style "Heading" mais court et sans ponctuation de phrase -> heading
+    # sinon, style Heading court et sans ponctuation de phrase -> heading
     if _is_heading_style(paragraph):
         if len(t) <= 80 and t.count(" ") <= 11 and all(p not in t for p in [".", "!", "?"]):
             return True
@@ -33,10 +32,11 @@ def _looks_like_heading(text: str, paragraph, expected_map: Dict[str, str]) -> b
 
 def parse_docx_sections(path, expected_headings: List[str] = None) -> Dict[str, str]:
     """
-    Retourne {heading: texte}. Détecte les titres par:
-      - appartenance à la liste 'expected_headings' (insensible casse/accents),
-      - OU style Heading court sans ponctuation.
-    Les tableaux sont ajoutés en Markdown sous le dernier titre vu.
+    Retourne {heading: texte}.
+    Détection d'un titre si:
+      - il appartient à expected_headings (insensible casse/accents), OU
+      - c'est un style Heading court sans ponctuation.
+    Les tableaux sont concaténés en Markdown sous le dernier heading vu.
     """
     doc = Document(path)
     expected_map = {_norm(h): h for h in (expected_headings or [])}
@@ -59,14 +59,12 @@ def parse_docx_sections(path, expected_headings: List[str] = None) -> Dict[str, 
             continue
         if _looks_like_heading(t, p, expected_map):
             flush()
-            # si c'est un titre "attendu", on met l'étiquette canonique (ex: "Introduction")
-            n = _norm(t)
-            current = expected_map.get(n, t)
+            current = expected_map.get(_norm(t), t)  # étiquette canonique si liste attendue
         else:
             buff.append(t)
     flush()
 
-    # Tables -> concat en Markdown sous le dernier heading (si présent)
+    # Tables -> ajout sous le dernier heading détecté
     last_heading = None
     for p in doc.paragraphs:
         if _looks_like_heading((p.text or "").strip(), p, expected_map):
