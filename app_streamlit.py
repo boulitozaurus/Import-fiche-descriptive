@@ -10,7 +10,7 @@ from typing import Dict, List
 from streamlit.components.v1 import html as st_html
 import mammoth
 from bs4 import BeautifulSoup
-
+import uuid
 # ---------------- Utils: headings + parsing ----------------
 from docx import Document
 from docx.table import _Cell, Table
@@ -29,14 +29,6 @@ NS_A = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main",
 def _data_uri(image):
     data = base64.b64encode(image.read()).decode("ascii")
     return {"src": f"data:{image.content_type};base64,{data}"}
-
-def docx_to_html(path: str) -> str:
-    with open(path, "rb") as f:
-        result = mammoth.convert_to_html(
-            f,
-            convert_image=mammoth.images.inline(_data_uri)
-        )
-    return result.value
 
 def split_sections_by_headings(html: str, expected_headings: list[str]) -> dict[str, str]:
     # normalisation légère
@@ -201,199 +193,6 @@ def _autolink_html(s: str) -> str:
                   r'<a href="\1" target="_blank" rel="noopener noreferrer">\1</a>', 
                   s)
 
-def _para_inner_html(p: Paragraph) -> str:
-    """
-    Construit l'HTML du paragraphe en respectant l'ordre réel des enfants XML :
-    - texte/images/retours (runs ordinaires),
-    - hyperliens <w:hyperlink r:id="...">...</w:hyperlink>,
-    - hyperliens <w:fldSimple w:instr="HYPERLINK ...">...</w:fldSimple>.
-    """
-    frags: list[str] = []
-
-    def _html_runs(children) -> str:
-        chunks = []
-        for r in children:
-            if r.tag.endswith("}r"):
-                chunks.append(_run_to_html(Run(r, p)))
-        return "".join(chunks)
-
-    for child in p._p.iterchildren():
-        tag = child.tag
-
-        # --- Cas 1 : <w:hyperlink> ---
-        if tag.endswith("}hyperlink"):
-            # URL via relation, sinon ancre (#bookmark)
-            url = None
-            rid = child.get(qn("r:id"))
-            if rid:
-                try:
-                    rel = p.part.rels.get(rid)
-                    if rel is not None:
-                        url = getattr(rel, "target_ref", None)
-                        if not url:
-                            tp = getattr(rel, "target_part", None)
-                            if tp is not None and hasattr(tp, "partname"):
-                                url = str(tp.partname)
-                except Exception:
-                    url = None
-            if not url:
-                anchor = child.get(qn("w:anchor"))
-                if anchor:
-                    url = f"#{anchor}"
-
-            inner_html = _html_runs(child.iterchildren())
-            if url:
-                frags.append(f'<a href="{_html_escape(str(url))}" target="_blank" rel="noopener noreferrer">{inner_html}</a>')
-            else:
-                frags.append(inner_html)
-            continue
-
-        # --- Cas 2 : <w:fldSimple w:instr="HYPERLINK ..."> ---
-        if tag.endswith("}fldSimple"):
-            instr = child.get(qn("w:instr")) or ""
-            m = re.search(r'HYPERLINK\s+"([^"]+)"', instr, flags=re.I) or re.search(r'HYPERLINK\s+(\S+)', instr, flags=re.I)
-            url = m.group(1) if m else None
-            inner_html = _html_runs(child.iterchildren())
-            if url:
-                frags.append(f'<a href="{_html_escape(str(url))}" target="_blank" rel="noopener noreferrer">{inner_html}</a>')
-            else:
-                frags.append(inner_html)
-            continue
-
-        # --- Cas 3 : run ordinaire (texte/images/retours) ---
-        if tag.endswith("}r"):
-            frags.append(_run_to_html(Run(child, p)))
-            continue
-
-        # Autres balises (bookmarks, etc.) -> ignorées
-
-    # Fallback si aucun enfant géré (cas rare)
-    if not frags:
-        return "".join(_run_to_html(run) for run in p.runs)
-
-    return "".join(frags)
-
-def _list_kind_from_numbering(p: Paragraph) -> str | None:
-    """Retourne 'ol' (numérotée) ou 'ul' (puces) si le paragraphe appartient à une liste Word."""
-    try:
-        pPr  = getattr(p._p, "pPr", None)
-        numPr = getattr(pPr, "numPr", None) if pPr is not None else None
-        if numPr is None:
-            return None
-
-        numId_el = getattr(numPr, "numId", None)
-        ilvl_el  = getattr(numPr, "ilvl", None)
-        numId = str(getattr(numId_el, "val", None)) if numId_el is not None else None
-        ilvl  = int(getattr(ilvl_el, "val", 0)) if ilvl_el is not None and getattr(ilvl_el, "val", None) is not None else 0
-        if not numId:
-            return None
-
-        np = getattr(p.part, "numbering_part", None)
-        if np is None:
-            return None
-        root = np.element
-
-        # 1) numId -> abstractNumId
-        abstract_id = None
-        for num in root.iterchildren():
-            if num.tag.endswith("}num") and num.get(qn("w:numId")) == numId:
-                for ch in num.iterchildren():
-                    if ch.tag.endswith("}abstractNumId"):
-                        abstract_id = ch.get(qn("w:val"))
-                        break
-                break
-        if abstract_id is None:
-            return None
-
-        # 2) abstractNumId -> numFmt (niveau ilvl si dispo)
-        fmt = None
-        for absn in root.iterchildren():
-            if absn.tag.endswith("}abstractNum") and absn.get(qn("w:abstractNumId")) == abstract_id:
-                # cherche le niveau exact
-                for lvl in absn.iterchildren():
-                    if lvl.tag.endswith("}lvl") and lvl.get(qn("w:ilvl")) == str(ilvl):
-                        for comp in lvl.iterchildren():
-                            if comp.tag.endswith("}numFmt"):
-                                fmt = (comp.get(qn("w:val")) or "").lower()
-                                break
-                        if fmt: break
-                # sinon prend le premier format trouvé
-                if not fmt:
-                    for lvl in absn.iterchildren():
-                        if lvl.tag.endswith("}lvl"):
-                            for comp in lvl.iterchildren():
-                                if comp.tag.endswith("}numFmt"):
-                                    fmt = (comp.get(qn("w:val")) or "").lower()
-                                    break
-                            if fmt: break
-                break
-
-        if not fmt:
-            return None
-        return "ul" if fmt == "bullet" else "ol"
-    except Exception:
-        return None
-
-def _para_list_kind(p: Paragraph, text: str) -> str | None:
-    """Renvoie 'ul', 'ol' ou None.
-
-    Priorité à la numérotation native de Word (numbering.xml).
-    Fallbacks très prudents :
-      - 'ol' uniquement si le texte commence par '1.' / '1) ...'
-      - 'ul' uniquement si le texte commence par un vrai symbole de puce.
-    """
-    kind = _list_kind_from_numbering(p)
-    if kind:
-        return kind
-
-    t = (text or "")
-    # OL manuel (ex: "1. ...", "2) ...")
-    if re.match(r'^\s*\d+[.)]\s', t):
-        return "ol"
-    # UL manuel (vrai symbole de puce tapé)
-    if t.lstrip().startswith(("•", "◦", "▪", "-", "–", "—", "*")):
-        return "ul"
-
-    return None
-
-def _iter_blocks(parent):
-    """Parcourt Paragraph/Table dans l'ordre d'apparition."""
-    # Cas Document : il faut descendre dans le body
-    try:
-        from docx.document import Document as _Doc
-    except Exception:
-        _Doc = None
-
-    if _Doc is not None and isinstance(parent, _Doc):
-        body = parent.element.body
-        for child in body.iterchildren():
-            if isinstance(child, CT_P):
-                yield Paragraph(child, parent)
-            elif isinstance(child, CT_Tbl):
-                yield Table(child, parent)
-        return
-
-    # Cas cellule de tableau
-    if isinstance(parent, _Cell):
-        for child in parent._tc.iterchildren():
-            if isinstance(child, CT_P):
-                yield Paragraph(child, parent)
-            elif isinstance(child, CT_Tbl):
-                yield Table(child, parent)
-        return
-
-    # Fallback (autres parents)
-    parent_elm = parent._element
-    for child in parent_elm.iterchildren():
-        if isinstance(child, CT_P):
-            yield Paragraph(child, parent)
-        elif isinstance(child, CT_Tbl):
-            yield Table(child, parent)
-
-# pour garder la liste des images non supportées (EMF/WMF) à proposer en téléchargement
-if "unsupported_images" not in st.session_state:
-    st.session_state["unsupported_images"] = []
-
 def _image_handler(image: mammoth.images.Image) -> dict:
     """Mammoth: renvoie un dict avec 'src' (data URI). EMF/WMF => on stocke pour download."""
     data = image.read()
@@ -502,9 +301,10 @@ if uploaded is not None:
     with open(tmp_path, "wb") as f:
         f.write(uploaded.read())
 
-    # 1) Parser HTML robuste
-    sections = parse_docx_sections_html(tmp_path, expected_headings=expected_word_headings)
-    sections_norm = {_norm(k): v for k, v in sections.items()}
+    # 1) Conversion DOCX -> HTML (Mammoth) puis découpe par titres
+        html = docx_to_html(str(tmp_path))
+        sections = split_sections_by_headings(html, expected_word_headings)
+        sections_norm = {_norm(k): v for k, v in sections.items()}
 
     # 2) Auto-mapping Word -> PDF/CRM (valeurs = HTML)
     fr_payload = {}
@@ -527,6 +327,7 @@ if uploaded is not None:
 
     # 3) Affichage vertical fidèle (HTML)
     st.header("Aperçu des sections (mise en forme préservée)")
+inject_css()
     def inject_css():
     st.markdown("""
             <style>
