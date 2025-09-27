@@ -122,11 +122,39 @@ def _para_to_html(p: Paragraph) -> tuple[str, str]:
     return ("p", f"<p>{inner}</p>")
 
 def _iter_blocks(parent):
-    # Parcours Paragraph / Table dans l'ordre
-    parent_elm = parent._tc if isinstance(parent, _Cell) else parent._element
+    """Parcourt Paragraph/Table dans l'ordre d'apparition."""
+    # Cas Document : il faut descendre dans le body
+    try:
+        from docx.document import Document as _Doc
+    except Exception:
+        _Doc = None
+
+    if _Doc is not None and isinstance(parent, _Doc):
+        body = parent.element.body
+        for child in body.iterchildren():
+            if isinstance(child, CT_P):
+                yield Paragraph(child, parent)
+            elif isinstance(child, CT_Tbl):
+                yield Table(child, parent)
+        return
+
+    # Cas cellule de tableau
+    if isinstance(parent, _Cell):
+        for child in parent._tc.iterchildren():
+            if isinstance(child, CT_P):
+                yield Paragraph(child, parent)
+            elif isinstance(child, CT_Tbl):
+                yield Table(child, parent)
+        return
+
+    # Fallback (autres parents)
+    parent_elm = parent._element
     for child in parent_elm.iterchildren():
-        if isinstance(child, CT_P):  yield Paragraph(child, parent)
-        elif isinstance(child, CT_Tbl): yield Table(child, parent)
+        if isinstance(child, CT_P):
+            yield Paragraph(child, parent)
+        elif isinstance(child, CT_Tbl):
+            yield Table(child, parent)
+
 
 def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, str]:
     doc = Document(path)
@@ -246,6 +274,15 @@ st.title("Auto-Mapping Word")
 st.caption("Déposez votre fiche .docx : mapping fixe Word→PDF/CRM")
 
 # Load schema + map
+def norm(s: str) -> str:
+    try:
+        import unicodedata
+        nfkd = unicodedata.normalize("NFKD", s or "")
+        s = "".join(ch for ch in nfkd if not unicodedata.combining(ch))
+    except Exception:
+        s = s or ""
+    return " ".join(s.lower().replace("’", "'").split())
+        
 schema = load_schema()
 fields = schema.get("fields", [])
 key_by_pdf_label_norm = {_norm(f["label"]): f["key"] for f in fields}
