@@ -4,7 +4,6 @@ import csv
 import json
 import yaml
 import requests
-import unicodedata
 import streamlit as st
 from pathlib import Path
 from typing import Dict, List
@@ -17,13 +16,32 @@ HEADING_STYLES = {
     "Titre 1","Titre 2","Titre 3","Title","Subtitle"
 }
 
-def _is_heading(p) -> bool:
+def _is_heading_style(p) -> bool:
     s = p.style.name if getattr(p, "style", None) else ""
     return (s in HEADING_STYLES) or s.startswith("Heading")
 
-def parse_docx_sections(path: Path) -> Dict[str, str]:
-    """Return {heading: text}. Tables are appended as markdown under the last heading."""
+def _looks_like_heading(text: str, paragraph, expected_map: dict) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    # 1) Titre exact attendu (selon ton mapping) → heading
+    if norm(t) in expected_map:
+        return True
+    # 2) Sinon, style "Heading" court et sans ponctuation de phrase → heading
+    if _is_heading_style(paragraph):
+        if len(t) <= 80 and t.count(" ") <= 11 and all(p not in t for p in [".", "!", "?"]):
+            return True
+    return False
+
+def parse_docx_sections(path: Path, expected_headings: list = None) -> Dict[str, str]:
+    """Return {heading: text}. Detect headings either from expected list or from short 'Heading' styled paras.
+       Tables are appended as markdown under the last heading."""
+    from docx import Document
     doc = Document(path)
+
+    # map normalisé -> étiquette canonique (ex: "introduction" -> "Introduction")
+    expected_map = {norm(h): h for h in (expected_headings or [])}
+
     sections: Dict[str, str] = {}
     current = None
     buff: List[str] = []
@@ -36,21 +54,26 @@ def parse_docx_sections(path: Path) -> Dict[str, str]:
                 sections[current] = (sections.get(current, "") + ("\n\n" if sections.get(current) else "") + text).strip()
         buff = []
 
+    # Parcours des paragraphes
     for p in doc.paragraphs:
         t = (p.text or "").strip()
-        if _is_heading(p) and t:
+        if not t:
+            continue
+        if _looks_like_heading(t, p, expected_map):
             flush()
-            current = t
+            # étiquette canonique si c'est un titre attendu, sinon le texte brut
+            current = expected_map.get(norm(t), t)
         else:
-            if t:
-                buff.append(t)
+            buff.append(t)
     flush()
 
-    # Append tables as simple markdown to the last heading if any
+    # Ajout des tableaux au dernier heading détecté
     last_heading = None
     for p in doc.paragraphs:
-        if _is_heading(p) and (p.text or "").strip():
-            last_heading = p.text.strip()
+        t = (p.text or "").strip()
+        if t and _looks_like_heading(t, p, expected_map):
+            last_heading = expected_map.get(norm(t), t)
+
     if doc.tables:
         md_chunks = []
         for table in doc.tables:
@@ -211,10 +234,7 @@ if uploaded is not None:
     with open(tmp_path, "wb") as f:
         f.write(uploaded.read())
 
-    try:
-        sections = parse_docx_sections(tmp_path, expected_headings=expected_word_headings)
-    except TypeError:
-        sections = parse_docx_sections_fallback(tmp_path, expected_headings=expected_word_headings)
+    sections = parse_docx_sections(tmp_path, expected_headings=expected_word_headings)
     sections_norm = {norm(k): v for k, v in sections.items()}
 
     # Auto-map FR payload
