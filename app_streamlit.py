@@ -96,18 +96,32 @@ def _run_to_html(run) -> str:
     return "".join(frags)
 
 def _para_list_kind(p: Paragraph, text: str) -> str | None:
-    # vrai numbering Word ?
-    if p._p.xpath("./w:pPr/w:numPr", namespaces=NS_W):
+    """Renvoie 'ul', 'ol' ou None sans utiliser xpath (robuste aux builds lxml)."""
+    # 1) Vrai numbering Word ? (sans xpath)
+    try:
+        pPr = getattr(p._p, "pPr", None)        # propriétés du paragraphe
+        numPr = getattr(pPr, "numPr", None) if pPr is not None else None
+    except Exception:
+        numPr = None
+
+    if numPr is not None:
+        # On a une liste Word. On devine ordonnée vs à puces via le style/texte.
         sname = (p.style.name if getattr(p, "style", None) else "") or ""
-        if "Number" in sname: return "ol"
-        if text and re.match(r"^\s*\d+([.)]\s|$)", text): return "ol"
+        if "Number" in sname or re.match(r"^\s*\d+([.)]\s|$)", text or ""):
+            return "ol"
         return "ul"
-    # styles usuels
+
+    # 2) Styles usuels de listes
     sname = (p.style.name if getattr(p, "style", None) else "") or ""
-    if any(k in sname for k in ["List", "Puces", "Bullet"]): return "ul"
-    if "Number" in sname: return "ol"
-    # symboles en début
-    if (text or "").lstrip().startswith(("•","◦","▪","-","–","—","*")): return "ul"
+    if any(k in sname for k in ["List", "Puces", "Bullet"]):
+        return "ul"
+    if "Number" in sname:
+        return "ol"
+
+    # 3) Heuristique symbole en début de ligne
+    if (text or "").lstrip().startswith(("•", "◦", "▪", "-", "–", "—", "*")):
+        return "ul"
+
     return None
 
 def _para_to_html(p: Paragraph) -> tuple[str, str]:
