@@ -71,8 +71,12 @@ def parse_docx_sections(path: Path) -> Dict[str, str]:
 def _strip_accents(x: str) -> str:
     if x is None:
         return ""
-    nfkd = unicodedata.normalize("NFKD", x)
-    return "".join(ch for ch in nfkd if not unicodedata.combining(ch))
+    try:
+        import unicodedata
+        nfkd = unicodedata.normalize("NFKD", x)
+        return "".join(ch for ch in nfkd if not unicodedata.combining(ch))
+    except Exception:
+        return x
 
 def norm(s: str) -> str:
     # lower + remove accents + normalize apostrophes + collapse spaces
