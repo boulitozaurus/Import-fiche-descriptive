@@ -211,7 +211,10 @@ if uploaded is not None:
     with open(tmp_path, "wb") as f:
         f.write(uploaded.read())
 
-    sections = parse_docx_sections(tmp_path, expected_headings=expected_word_headings)
+    try:
+        sections = parse_docx_sections(tmp_path, expected_headings=expected_word_headings)
+    except TypeError:
+        sections = parse_docx_sections_fallback(tmp_path, expected_headings=expected_word_headings)
     sections_norm = {norm(k): v for k, v in sections.items()}
 
     # Auto-map FR payload
