@@ -2,3 +2,5 @@ streamlit
 python-docx
 PyYAML
 requests
+mammoth
+beautifulsoup4
