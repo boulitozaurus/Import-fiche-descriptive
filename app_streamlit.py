@@ -67,28 +67,22 @@ def _wrap_styles(run, txt: str) -> str:
         open_tags += "<strong>"; close_tags = "</strong>" + close_tags
     return f"{open_tags}{txt}{close_tags}"
 
-def _run_image_dataurl(run) -> str | None:
-    """Retourne une data-URI si une image est présente dans ce run.
-       Gère w:drawing/a:blip (modernes) ET w:pict/v:imagedata (hérités)."""
+def _run_image_payload(run):
+    """Retourne un dict:
+       {"kind":"img","src":data_uri}  ou
+       {"kind":"download","mime":mime,"href":data_uri_download}  pour EMF/WMF."""
     try:
         def find_rid(el):
-            # recherche récursive d'un rId pour l'image
             for child in el.iterchildren():
                 tag = child.tag
-                # Cas moderne: a:blip r:embed="rIdX"
                 if tag.endswith("}blip"):
                     rid = child.get(qn("r:embed"))
-                    if rid:
-                        return rid
-                # Cas hérité: v:imagedata r:id="rIdX"
+                    if rid: return rid
                 if tag.endswith("}imagedata"):
                     rid = child.get(qn("r:id"))
-                    if rid:
-                        return rid
-                # descente récursive
+                    if rid: return rid
                 rid = find_rid(child)
-                if rid:
-                    return rid
+                if rid: return rid
             return None
 
         rId = find_rid(run._r)
@@ -97,24 +91,35 @@ def _run_image_dataurl(run) -> str | None:
         part = run.part.related_parts.get(rId)
         if not part:
             return None
-        ctype = getattr(part, "content_type", "image/png")
-        import base64
-        b64 = base64.b64encode(part.blob).decode("ascii")
-        return f"data:{ctype};base64,{b64}"
+        mime = (getattr(part, "content_type", "application/octet-stream") or "").lower()
+        b64  = base64.b64encode(part.blob).decode("ascii")
+        # Formats d'image supportés nativement par le navigateur
+        ok = {"image/png","image/jpeg","image/jpg","image/gif","image/webp","image/svg+xml","image/bmp","image/tiff"}
+        if mime in ok:
+            return {"kind":"img","src": f"data:{mime};base64,{b64}"}
+        # EMF/WMF -> non supporté : proposer un téléchargement propre
+        if "emf" in mime or "wmf" in mime:
+            return {"kind":"download","mime": mime, "href": f"data:application/octet-stream;base64,{b64}"}
+        # sinon on tente quand même
+        return {"kind":"img","src": f"data:{mime};base64,{b64}"}
     except Exception:
         return None
 
 def _run_to_html(run) -> str:
-    # images & sauts de ligne <w:br/>
-    dataurl = _run_image_dataurl(run)
-    if dataurl:
-        return f'<img src="{dataurl}" />'
+    payload = _run_image_payload(run)
+    if payload:
+        if payload["kind"] == "img":
+            return f'<img src="{payload["src"]}" />'
+        else:
+            ext = payload["mime"].split("/")[-1]
+            return (f'<span class="img-unsupported">[image {ext.upper()} non supportée] '
+                    f'<a href="{payload["href"]}" download="image.{ext}">Télécharger</a></span>')
+    # sinon texte & sauts de ligne
     frags = []
     for child in run._r.iterchildren():
         if child.tag.endswith("}t"):
             txt = _html_escape(child.text or "")
-            if txt:
-                frags.append(_wrap_styles(run, txt))
+            if txt: frags.append(_wrap_styles(run, txt))
         elif child.tag.endswith("}br"):
             frags.append("<br/>")
     if not frags:
@@ -271,20 +276,32 @@ def _para_list_info(p: Paragraph, text: str) -> tuple[str | None, int | None]:
     return kind, level
 
 def _para_to_html(p: Paragraph) -> tuple[str, str]:
-    """("p"|"li-ul"|"li-ol", html) — conserve <br>, <img>, styles, liens."""
+    """
+    Retourne ("p" | "li-ul" | "li-ol", html).
+    - Conserve styles (gras/italique/souligné/couleur), <br/>, images et liens.
+    - Détecte listes et retire le symbole de puce s'il est présent dans le texte.
+    """
+    # HTML interne du paragraphe (runs formatés + liens + images)
     inner = _para_inner_html(p) or _html_escape(p.text or "")
-inner = _autolink_html(inner)
+    # Auto-link des URLs brutes si Word n'a pas créé d'hyperlien
+    inner = _autolink_html(inner)
+
+    # Type de liste (ul/ol) + niveau (non utilisé ici, géré par la pile côté appelant)
     kind, _ = _para_list_info(p, p.text or "")
+
     if kind == "ol":
         return ("li-ol", f"<li>{inner}</li>")
-    if kind == "ul":
-        # si le symbole est dans le texte, on le retire
-        for b in ("•","◦","▪","-","–","—","*"):
-            if inner.startswith(b):
-                inner = inner[len(b):].lstrip(); break
-        return ("li-ul", f"<li>{inner}</li>")
-    return ("p", f"<p>{inner}</p>")
 
+    if kind == "ul":
+        # Si le symbole de puce fait partie du texte, on l’enlève pour éviter le doublon
+        for b in ("•", "◦", "▪", "-", "–", "—", "*"):
+            if inner.startswith(b):
+                inner = inner[len(b):].lstrip()
+                break
+        return ("li-ul", f"<li>{inner}</li>")
+
+    # Paragraphe standard
+    return ("p", f"<p>{inner}</p>")
 
 def _iter_blocks(parent):
     """Parcourt Paragraph/Table dans l'ordre d'apparition."""
@@ -529,6 +546,7 @@ if uploaded is not None:
           .sect td, .sect th { border: 1px solid #666; padding: 6px; vertical-align: top; }
           .sect img { max-width: 100%; height: auto; display: inline-block; }
           .sect a { text-decoration: underline; }
+          .sect .img-unsupported { display:inline-block; padding:2px 6px; border:1px dashed #888; border-radius:6px; font-size:.9em; opacity:.9; }
         </style>
         """, unsafe_allow_html=True)
 
