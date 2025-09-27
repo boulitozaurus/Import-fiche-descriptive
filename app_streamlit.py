@@ -161,46 +161,46 @@ def load_heading_map() -> Dict[str, str]:
 
 # ---------------- Free translation engines (no API key) ----------------
 
-def split_blocks(text: str) -> List[str]:
-    # translate paragraph-by-paragraph to preserve lists/spacing
-    return [b for b in text.split("\n\n")]
+def split_html_blocks(text: str) -> List[str]:
+    # coupe grossièrement sur balises de paragraphe / liste pour limiter la longueur des requêtes
+    import re
+    chunks = re.split(r"(?i)(</p>|</li>)", text)
+    # recolle les séparateurs pour ne pas perdre les balises fermantes
+    out, buf = [], ""
+    for i in range(0, len(chunks), 2):
+        seg = chunks[i]
+        end = chunks[i+1] if i+1 < len(chunks) else ""
+        block = (seg + end).strip()
+        if block:
+            out.append(block)
+    return out or [text]
 
-def join_blocks(blocks: List[str]) -> str:
-    return "\n\n".join(blocks)
-
-def translate_fr_to_nl_mymemory(text: str) -> str:
-    if not text.strip():
+def translate_fr_to_nl_mymemory_html(html: str) -> str:
+    if not html.strip():
         return ""
     out = []
-    for b in split_blocks(text):
-        if not b.strip():
-            out.append("")
-            continue
-        r = requests.get(
-            "https://api.mymemory.translated.net/get",
-            params={"q": b, "langpair": "fr|nl"},
-            timeout=30
-        )
-        r.raise_for_status()
-        out.append(r.json()["responseData"]["translatedText"])
-    return join_blocks(out)
+    for b in split_html_blocks(html):
+        try:
+            r = requests.get(
+                "https://api.mymemory.translated.net/get",
+                params={"q": b, "langpair": "fr|nl"},
+                timeout=30
+            )
+            r.raise_for_status()
+            out.append(r.json()["responseData"]["translatedText"])
+        except Exception as e:
+            out.append(f"[TRAD ERREUR: {e}]")
+    return "".join(out)
 
-def translate_fr_to_nl_libretranslate(text: str, endpoint: str) -> str:
-    if not text.strip():
+def translate_fr_to_nl_libretranslate_html(html: str, endpoint: str) -> str:
+    if not html.strip():
         return ""
     out = []
-    for b in split_blocks(text):
-        if not b.strip():
-            out.append("")
-            continue
-        r = requests.post(
-            endpoint,
-            json={"q": b, "source": "fr", "target": "nl", "format": "text"},
-            timeout=60
-        )
+    for b in split_html_blocks(html):
+        r = requests.post(endpoint, json={"q": b, "source": "fr", "target": "nl", "format": "html"}, timeout=60)
         r.raise_for_status()
         out.append(r.json()["translatedText"])
-    return join_blocks(out)
+    return "".join(out)
 
 # ---------------- UI ----------------
 
@@ -261,14 +261,18 @@ if uploaded is not None:
 
     # Optional FR edits
     st.subheader("Ajustements éventuels (FR)")
+
     edited_fr = {}
-    cols = st.columns(2)
-    for i, fdef in enumerate(fields):
+    for fdef in fields:
         key = fdef["key"]
         label = fdef["label"]
-        val = fr_payload.get(key, "")
-        with cols[i % 2]:
-            edited_fr[key] = st.text_area(f"{label} ({key}) — FR", value=val, height=160, key=f"edit_{key}")
+        val_html = fr_payload.get(key, "")
+    
+        with st.expander(f"{label} ({key}) — FR", expanded=True):
+            # Aperçu fidèle (HTML)
+            st.markdown(val_html if val_html else "_(vide)_", unsafe_allow_html=True)
+            st.caption("Source HTML (éditable) — ce sera le texte envoyé à l'IT et à la traduction")
+            edited_fr[key] = st.text_area(f"HTML {label}", value=val_html, height=220, key=f"html_{key}")
 
     # Translate + export
     st.header("2) Traduire et Exporter")
@@ -277,15 +281,14 @@ if uploaded is not None:
         for fdef in fields:
             key = fdef["key"]
             nl_key = nl_key_by_key.get(key)
-            text_fr = edited_fr.get(key, "")
-
+            html_fr = edited_fr.get(key, "")
+        
             if provider.startswith("MyMemory"):
-                text_nl = translate_fr_to_nl_mymemory(text_fr) if text_fr.strip() else ""
+                html_nl = translate_fr_to_nl_mymemory_html(html_fr) if html_fr.strip() else ""
             else:
-                text_nl = translate_fr_to_nl_libretranslate(text_fr, lt_endpoint) if text_fr.strip() else ""
-
-            results.append({"key": key, "fr": text_fr, "nl_key": nl_key, "nl": text_nl})
-
+                html_nl = translate_fr_to_nl_libretranslate_html(html_fr, lt_endpoint) if html_fr.strip() else ""
+        
+            results.append({"key": key, "fr": html_fr, "nl_key": nl_key, "nl": html_nl})
         st.session_state["results_auto"] = results
 
     results = st.session_state.get("results_auto")
