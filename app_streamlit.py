@@ -7,95 +7,25 @@ import requests
 import streamlit as st
 from pathlib import Path
 from typing import Dict, List
-from docx import Document
 from streamlit.components.v1 import html as st_html
 
 
 # ---------------- Utils: headings + parsing ----------------
+# === Parser DOCX -> sections HTML fidèles (listes/tableaux/images/formatage) ===
+from docx import Document
+from docx.table import _Cell, Table
+from docx.text.paragraph import Paragraph
+from docx.oxml.table import CT_Tbl
+from docx.oxml.text.paragraph import CT_P
+import base64, re
 
-HEADING_STYLES = {
-    "Heading 1","Heading 2","Heading 3",
-    "Titre 1","Titre 2","Titre 3","Title","Subtitle"
-}
-
-def _is_heading_style(p) -> bool:
-    s = p.style.name if getattr(p, "style", None) else ""
-    return (s in HEADING_STYLES) or s.startswith("Heading")
-
-def _looks_like_heading(text: str, paragraph, expected_map: dict) -> bool:
-    t = (text or "").strip()
-    if not t:
-        return False
-    # 1) Titre exact attendu (selon ton mapping) → heading
-    if norm(t) in expected_map:
-        return True
-    # 2) Sinon, style "Heading" court et sans ponctuation de phrase → heading
-    if _is_heading_style(paragraph):
-        if len(t) <= 80 and t.count(" ") <= 11 and all(p not in t for p in [".", "!", "?"]):
-            return True
-    return False
-
-def parse_docx_sections(path: Path, expected_headings: list = None) -> Dict[str, str]:
-    """Return {heading: text}. Detect headings either from expected list or from short 'Heading' styled paras.
-       Tables are appended as markdown under the last heading."""
-    from docx import Document
-    doc = Document(path)
-
-    # map normalisé -> étiquette canonique (ex: "introduction" -> "Introduction")
-    expected_map = {norm(h): h for h in (expected_headings or [])}
-
-    sections: Dict[str, str] = {}
-    current = None
-    buff: List[str] = []
-
-    def flush():
-        nonlocal current, buff
-        if current and buff:
-            text = "\n\n".join([x for x in buff if x.strip()])
-            if text.strip():
-                sections[current] = (sections.get(current, "") + ("\n\n" if sections.get(current) else "") + text).strip()
-        buff = []
-
-    # Parcours des paragraphes
-    for p in doc.paragraphs:
-        t = (p.text or "").strip()
-        if not t:
-            continue
-        if _looks_like_heading(t, p, expected_map):
-            flush()
-            # étiquette canonique si c'est un titre attendu, sinon le texte brut
-            current = expected_map.get(norm(t), t)
-        else:
-            buff.append(t)
-    flush()
-
-    # Ajout des tableaux au dernier heading détecté
-    last_heading = None
-    for p in doc.paragraphs:
-        t = (p.text or "").strip()
-        if t and _looks_like_heading(t, p, expected_map):
-            last_heading = expected_map.get(norm(t), t)
-
-    if doc.tables:
-        md_chunks = []
-        for table in doc.tables:
-            rows = []
-            for row in table.rows:
-                rows.append([c.text.strip() for c in row.cells])
-            md = "\n".join("| " + " | ".join(r) + " |" for r in rows if any(x for x in r))
-            if md.strip():
-                md_chunks.append(md)
-        if md_chunks:
-            target = last_heading or "TABLES"
-            sections[target] = (sections.get(target, "") + ("\n\n" if sections.get(target) else "") + "\n\n".join(md_chunks)).strip()
-
-    return sections
-
-# ---------------- Robust normalization (no Unidecode needed) ----------------
+HEADING_STYLES = {"Heading 1","Heading 2","Heading 3","Titre 1","Titre 2","Titre 3","Title","Subtitle"}
+NS_W = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+NS_A = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+        "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships"}
 
 def _strip_accents(x: str) -> str:
-    if x is None:
-        return ""
+    if x is None: return ""
     try:
         import unicodedata
         nfkd = unicodedata.normalize("NFKD", x)
@@ -103,9 +33,157 @@ def _strip_accents(x: str) -> str:
     except Exception:
         return x
 
-def norm(s: str) -> str:
-    # lower + remove accents + normalize apostrophes + collapse spaces
-    return " ".join(_strip_accents((s or "")).lower().replace("’", "'").split())
+def _norm(s: str) -> str:
+    return " ".join(_strip_accents((s or "")).lower().replace("’","'").split())
+
+def _is_heading_style(p: Paragraph) -> bool:
+    s = p.style.name if getattr(p, "style", None) else ""
+    return (s in HEADING_STYLES) or s.startswith("Heading")
+
+def _looks_like_heading(text: str, p: Paragraph, expected_map: dict) -> bool:
+    t = (text or "").strip()
+    if not t: return False
+    if _norm(t) in expected_map or _norm(t.rstrip(":")) in expected_map:
+        return True
+    if _is_heading_style(p):
+        if len(t) <= 80 and t.count(" ") <= 11 and all(x not in t for x in [".","!","?"]):
+            return True
+    return False
+
+def _html_escape(s: str) -> str:
+    return (s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+
+def _wrap_styles(run, txt: str) -> str:
+    open_tags, close_tags = "", ""
+    color = getattr(getattr(run.font, "color", None), "rgb", None)
+    if color:
+        open_tags += f'<span style="color:#{str(color)}">'; close_tags = "</span>" + close_tags
+    if getattr(run, "underline", False):
+        open_tags += "<u>"; close_tags = "</u>" + close_tags
+    if getattr(run, "italic", False):
+        open_tags += "<em>"; close_tags = "</em>" + close_tags
+    if getattr(run, "bold", False):
+        open_tags += "<strong>"; close_tags = "</strong>" + close_tags
+    return f"{open_tags}{txt}{close_tags}"
+
+def _run_image_dataurl(run) -> str | None:
+    try:
+        blips = run._r.xpath(".//a:blip/@r:embed", namespaces={**NS_A})
+        if not blips: return None
+        part = run.part.related_parts[blips[0]]
+        ctype = getattr(part, "content_type", "image/png")
+        b64 = base64.b64encode(part.blob).decode("ascii")
+        return f"data:{ctype};base64,{b64}"
+    except Exception:
+        return None
+
+def _run_to_html(run) -> str:
+    # images & sauts de ligne <w:br/>
+    dataurl = _run_image_dataurl(run)
+    if dataurl:
+        return f'<img src="{dataurl}" />'
+    frags = []
+    for child in run._r.iterchildren():
+        if child.tag.endswith("}t"):
+            txt = _html_escape(child.text or "")
+            if txt:
+                frags.append(_wrap_styles(run, txt))
+        elif child.tag.endswith("}br"):
+            frags.append("<br/>")
+    if not frags:
+        txt = _html_escape(run.text or "")
+        if txt: frags.append(_wrap_styles(run, txt))
+    return "".join(frags)
+
+def _para_list_kind(p: Paragraph, text: str) -> str | None:
+    # vrai numbering Word ?
+    if p._p.xpath("./w:pPr/w:numPr", namespaces=NS_W):
+        sname = (p.style.name if getattr(p, "style", None) else "") or ""
+        if "Number" in sname: return "ol"
+        if text and re.match(r"^\s*\d+([.)]\s|$)", text): return "ol"
+        return "ul"
+    # styles usuels
+    sname = (p.style.name if getattr(p, "style", None) else "") or ""
+    if any(k in sname for k in ["List", "Puces", "Bullet"]): return "ul"
+    if "Number" in sname: return "ol"
+    # symboles en début
+    if (text or "").lstrip().startswith(("•","◦","▪","-","–","—","*")): return "ul"
+    return None
+
+def _para_to_html(p: Paragraph) -> tuple[str, str]:
+    inner = "".join(_run_to_html(r) for r in p.runs) or _html_escape(p.text or "")
+    kind = _para_list_kind(p, p.text or "")
+    if kind == "ol": return ("li-ol", f"<li>{inner}</li>")
+    if kind == "ul":
+        # enlève le symbole s'il est vraiment dans le texte
+        for b in ("•","◦","▪","-","–","—","*"):
+            if inner.startswith(b): inner = inner[len(b):].lstrip(); break
+        return ("li-ul", f"<li>{inner}</li>")
+    return ("p", f"<p>{inner}</p>")
+
+def _iter_blocks(parent):
+    # Parcours Paragraph / Table dans l'ordre
+    parent_elm = parent._tc if isinstance(parent, _Cell) else parent._element
+    for child in parent_elm.iterchildren():
+        if isinstance(child, CT_P):  yield Paragraph(child, parent)
+        elif isinstance(child, CT_Tbl): yield Table(child, parent)
+
+def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, str]:
+    doc = Document(path)
+    exp = {_norm(h): h for h in expected_headings}
+    exp.update({_norm(h.rstrip(":")): h for h in expected_headings})
+
+    sections: dict[str, str] = {}
+    current = None
+    buf = []
+    in_list = False
+    list_kind = None  # 'ul'/'ol'
+
+    def flush():
+        nonlocal buf, in_list, list_kind, current
+        if in_list:
+            buf.append(f"</{list_kind}>"); in_list=False; list_kind=None
+        if current and buf:
+            html = "".join(buf).strip()
+            if html: sections[current] = (sections.get(current,"") + html)
+        buf = []
+
+    for block in _iter_blocks(doc):
+        if isinstance(block, Paragraph):
+            t = (block.text or "").strip()
+            if t and _looks_like_heading(t, block, exp):
+                flush()
+                current = exp.get(_norm(t), exp.get(_norm(t.rstrip(":")), t))
+                continue
+            kind, frag = _para_to_html(block)
+            if kind == "p":
+                if in_list:
+                    buf.append(f"</{list_kind}>"); in_list=False; list_kind=None
+                buf.append(frag)
+            else:
+                target = "ol" if kind == "li-ol" else "ul"
+                if not in_list or list_kind != target:
+                    if in_list: buf.append(f"</{list_kind}>")
+                    buf.append(f"<{target}>"); in_list=True; list_kind=target
+                buf.append(frag)
+        else:
+            # Table
+            if in_list:
+                buf.append(f"</{list_kind}>"); in_list=False; list_kind=None
+            rows = []
+            for row in block.rows:
+                tds = []
+                for cell in row.cells:
+                    parts = []
+                    for pp in cell.paragraphs:
+                        k, frag = _para_to_html(pp)
+                        parts.append(f"<ul>{frag}</ul>" if k.startswith("li") else frag)
+                    tds.append(f"<td>{''.join(parts) or '&nbsp;'}</td>")
+                rows.append(f"<tr>{''.join(tds)}</tr>")
+            buf.append("<table border='1' cellspacing='0' cellpadding='6' style='border-collapse:collapse;width:100%'>"
+                       + "".join(rows) + "</table>")
+    flush()
+    return sections
 
 # ---------------- Load schema + fixed heading map ----------------
 
@@ -178,50 +256,46 @@ expected_word_headings = list(word_to_pdf.keys())
 # Upload
 st.header("1) Charger la fiche .docx")
 uploaded = st.file_uploader("Glissez le .docx ici", type=["docx"])
-
 if uploaded is not None:
     tmp_path = Path("uploaded.docx")
     with open(tmp_path, "wb") as f:
         f.write(uploaded.read())
 
-    # Parse (HTML par section)
-    sections = parse_docx_sections(tmp_path, expected_headings=expected_word_headings)
+    # 1) Parser HTML robuste
+    sections = parse_docx_sections_html(tmp_path, expected_headings=expected_word_headings)
     sections_norm = {norm(k): v for k, v in sections.items()}
-    
-    # Auto-map (FR HTML)
-    rows = []
+
+    # 2) Auto-mapping Word -> PDF/CRM (valeurs = HTML)
     fr_payload = {}
+    rows = []
     for word_h, pdf_h in word_to_pdf.items():
-        w_norm = norm(word_h)
+        w_norm = norm(word_h); w_norm2 = norm(word_h.rstrip(":"))
         target_key = key_by_pdf_label_norm.get(norm(pdf_h))
-        found = w_norm in sections_norm or norm(word_h.rstrip(":")) in sections_norm
-        fr_html = sections_norm.get(w_norm) or sections_norm.get(norm(word_h.rstrip(":")), "")
-        if target_key:
-            fr_payload[target_key] = fr_html
+        found = (w_norm in sections_norm) or (w_norm2 in sections_norm)
+        fr_html = sections_norm.get(w_norm) or sections_norm.get(w_norm2, "")
+        if target_key: fr_payload[target_key] = fr_html
         rows.append({
             "Word heading attendu": word_h,
             "Dans le .docx ?": "✅ Oui" if found else "❌ Non",
             "PDF/CRM heading": pdf_h,
-            "CRM key": target_key or "(non défini)",
+            "CRM key": target_key or "(non défini)"
         })
-    
-    st.subheader("Résultat du mapping automatique")
-    st.dataframe(rows)  # affichage simple
-    
-    # ====== Affichage VERTICAL des sections (HTML) ======
-    st.header("Aperçu des sections (mise en forme préservée)")
 
-    # petit CSS pour marges correctes
+    st.subheader("Résultat du mapping automatique")
+    st.dataframe(rows)
+
+    # 3) Affichage vertical fidèle (HTML)
+    st.header("Aperçu des sections (mise en forme préservée)")
     st.markdown("""
     <style>
-      .sect p { margin: 0 0 10px 0; line-height: 1.5; }
+      .sect p { margin: 0 0 10px 0; line-height: 1.55; }
       .sect ul, .sect ol { margin: 6px 0 12px 1.4rem; }
       .sect table { border-collapse: collapse; width: 100%; margin: 6px 0 12px 0; }
       .sect td, .sect th { border: 1px solid #666; padding: 6px; vertical-align: top; }
-      .sect img { max-width: 100%; height: auto; }
+      .sect img { max-width: 100%; height: auto; display: inline-block; }
     </style>
     """, unsafe_allow_html=True)
-    
+
     for fdef in fields:
         key = fdef["key"]; label = fdef["label"]
         html_content = fr_payload.get(key, "")
