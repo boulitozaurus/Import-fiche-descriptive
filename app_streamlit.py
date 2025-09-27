@@ -273,7 +273,7 @@ def _para_list_info(p: Paragraph, text: str) -> tuple[str | None, int | None]:
 def _para_to_html(p: Paragraph) -> tuple[str, str]:
     """("p"|"li-ul"|"li-ol", html) — conserve <br>, <img>, styles, liens."""
     inner = _para_inner_html(p) or _html_escape(p.text or "")
-        inner = _autolink_html(inner)
+inner = _autolink_html(inner)
     kind, _ = _para_list_info(p, p.text or "")
     if kind == "ol":
         return ("li-ol", f"<li>{inner}</li>")
