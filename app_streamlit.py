@@ -18,6 +18,7 @@ from docx.text.paragraph import Paragraph
 from docx.oxml.table import CT_Tbl
 from docx.oxml.text.paragraph import CT_P
 import base64, re
+from docx.oxml.ns import qn
 
 HEADING_STYLES = {"Heading 1","Heading 2","Heading 3","Titre 1","Titre 2","Titre 3","Title","Subtitle"}
 NS_W = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
@@ -95,45 +96,104 @@ def _run_to_html(run) -> str:
         if txt: frags.append(_wrap_styles(run, txt))
     return "".join(frags)
 
-def _para_list_kind(p: Paragraph, text: str) -> str | None:
-    """Renvoie 'ul', 'ol' ou None sans utiliser xpath (robuste aux builds lxml)."""
-    # 1) Vrai numbering Word ? (sans xpath)
+def _hyperlink_map(p: Paragraph) -> dict:
+    """Mappe chaque run XML à son URL si le run est à l'intérieur d'un <w:hyperlink>."""
+    m = {}
     try:
-        pPr = getattr(p._p, "pPr", None)        # propriétés du paragraphe
+        for hl in p._p.iterchildren():
+            if hl.tag.endswith("}hyperlink"):
+                r_id = hl.get(qn("r:id"))
+                url = None
+                if r_id:
+                    rel = p.part.rels.get(r_id)
+                    if rel is not None:
+                        # python-docx: .target_ref pour les liens externes
+                        url = getattr(rel, "target_ref", None) or getattr(rel, "target_part", None)
+                        if hasattr(url, "partname"):  # cible interne
+                            url = str(url.partname)
+                # marque les <w:r> enfants de ce hyperlink
+                for r in hl.iterchildren():
+                    if r.tag.endswith("}r"):
+                        m[r] = url
+    except Exception:
+        pass
+    return m
+
+def _para_inner_html(p: Paragraph) -> str:
+    """Constitue l'HTML interne d'un paragraphe en conservant <a href> autour des runs dans les hyperliens."""
+    link_by_run = _hyperlink_map(p)
+    frags = []
+    for run in p.runs:
+        chunk = _run_to_html(run)
+        url = link_by_run.get(run._r)
+        if url:
+            url_esc = _html_escape(str(url))
+            chunk = f'<a href="{url_esc}" target="_blank" rel="noopener noreferrer">{chunk}</a>'
+        frags.append(chunk)
+    return "".join(frags)
+
+def _para_list_kind(p: Paragraph, text: str) -> str | None:
+    """Renvoie 'ul', 'ol' ou None sans xpath."""
+    # 1) Numérotation Word native ?
+    try:
+        pPr = getattr(p._p, "pPr", None)
         numPr = getattr(pPr, "numPr", None) if pPr is not None else None
     except Exception:
         numPr = None
-
     if numPr is not None:
-        # On a une liste Word. On devine ordonnée vs à puces via le style/texte.
         sname = (p.style.name if getattr(p, "style", None) else "") or ""
         if "Number" in sname or re.match(r"^\s*\d+([.)]\s|$)", text or ""):
             return "ol"
         return "ul"
 
-    # 2) Styles usuels de listes
+    # 2) Styles usuels
     sname = (p.style.name if getattr(p, "style", None) else "") or ""
     if any(k in sname for k in ["List", "Puces", "Bullet"]):
         return "ul"
     if "Number" in sname:
         return "ol"
 
-    # 3) Heuristique symbole en début de ligne
+    # 3) Symbole en début
     if (text or "").lstrip().startswith(("•", "◦", "▪", "-", "–", "—", "*")):
         return "ul"
-
     return None
 
+def _para_list_info(p: Paragraph, text: str) -> tuple[str | None, int | None]:
+    """('ul'/'ol', niveau>=0) ou (None, None). Niveau via numPr.ilvl, sinon heuristique indent."""
+    kind = _para_list_kind(p, text)
+    if not kind:
+        return None, None
+    level = 0
+    try:
+        pPr = getattr(p._p, "pPr", None)
+        numPr = getattr(pPr, "numPr", None) if pPr is not None else None
+        ilvl = getattr(numPr, "ilvl", None) if numPr is not None else None
+        if ilvl is not None and getattr(ilvl, "val", None) is not None:
+            level = int(ilvl.val)
+        else:
+            ind = getattr(pPr, "ind", None) if pPr is not None else None
+            left = getattr(ind, "left", None) if ind is not None else None
+            if left is not None:
+                # 720 twips ~ 0.5", approximons un niveau par 720 twips
+                level = max(0, min(6, int(left) // 720))
+    except Exception:
+        pass
+    return kind, level
+
 def _para_to_html(p: Paragraph) -> tuple[str, str]:
-    inner = "".join(_run_to_html(r) for r in p.runs) or _html_escape(p.text or "")
-    kind = _para_list_kind(p, p.text or "")
-    if kind == "ol": return ("li-ol", f"<li>{inner}</li>")
+    """("p"|"li-ul"|"li-ol", html) — conserve <br>, <img>, styles, liens."""
+    inner = _para_inner_html(p) or _html_escape(p.text or "")
+    kind, _ = _para_list_info(p, p.text or "")
+    if kind == "ol":
+        return ("li-ol", f"<li>{inner}</li>")
     if kind == "ul":
-        # enlève le symbole s'il est vraiment dans le texte
+        # si le symbole est dans le texte, on le retire
         for b in ("•","◦","▪","-","–","—","*"):
-            if inner.startswith(b): inner = inner[len(b):].lstrip(); break
+            if inner.startswith(b):
+                inner = inner[len(b):].lstrip(); break
         return ("li-ul", f"<li>{inner}</li>")
     return ("p", f"<p>{inner}</p>")
+
 
 def _iter_blocks(parent):
     """Parcourt Paragraph/Table dans l'ordre d'apparition."""
@@ -191,39 +251,70 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
         buf = []
 
     for block in _iter_blocks(doc):
-        if isinstance(block, Paragraph):
-            t = (block.text or "").strip()
-            if t and _looks_like_heading(t, block, exp):
-                flush()
-                current = exp.get(_norm(t), exp.get(_norm(t.rstrip(":")), t))
-                continue
-            kind, frag = _para_to_html(block)
-            if kind == "p":
-                if in_list:
-                    buf.append(f"</{list_kind}>"); in_list=False; list_kind=None
-                buf.append(frag)
+            if isinstance(block, Paragraph):
+                t = (block.text or "").strip()
+                if t and _looks_like_heading(t, block, exp):
+                    # On ferme toutes les listes ouvertes avant de changer de section
+                    while list_stack:
+                        buf.append(f"</{list_stack.pop()}>")
+                    flush()
+                    current = exp.get(_norm(t), exp.get(_norm(t.rstrip(":")), t))
+                    continue
+        
+                # --- gestion des listes NIVEAU / TYPE ---
+                kind, level = _para_list_info(block, block.text or "")
+                if kind is None:
+                    # on ferme toutes les listes si on n'est plus dans une liste
+                    while list_stack:
+                        buf.append(f"</{list_stack.pop()}>")
+                    # paragraphe simple
+                    buf.append(_para_to_html(block)[1])
+                    continue
+        
+                # On veut une profondeur cible = level+1 (car niveau 0 => 1 liste ouverte)
+                target_depth = (level or 0) + 1
+        
+                # Ferme si on est trop profond
+                while len(list_stack) > target_depth:
+                    buf.append(f"</{list_stack.pop()}>")
+        
+                # Ouvre si pas assez profond
+                while len(list_stack) < target_depth:
+                    # si on ouvre le dernier niveau demandé, on respecte le type détecté (ul/ol)
+                    to_open = kind if len(list_stack) + 1 == target_depth else "ul"
+                    buf.append(f"<{to_open}>")
+                    list_stack.append(to_open)
+        
+                # Ajuste le type au niveau courant si besoin (ul -> ol, etc.)
+                if list_stack and list_stack[-1] != kind:
+                    buf.append(f"</{list_stack.pop()}>")
+                    buf.append(f"<{kind}>")
+                    list_stack.append(kind)
+        
+                # Ajoute l'item
+                _, li_html = _para_to_html(block)
+                buf.append(li_html)
+        
             else:
-                target = "ol" if kind == "li-ol" else "ul"
-                if not in_list or list_kind != target:
-                    if in_list: buf.append(f"</{list_kind}>")
-                    buf.append(f"<{target}>"); in_list=True; list_kind=target
-                buf.append(frag)
-        else:
-            # Table
-            if in_list:
-                buf.append(f"</{list_kind}>"); in_list=False; list_kind=None
-            rows = []
-            for row in block.rows:
-                tds = []
-                for cell in row.cells:
-                    parts = []
-                    for pp in cell.paragraphs:
-                        k, frag = _para_to_html(pp)
-                        parts.append(f"<ul>{frag}</ul>" if k.startswith("li") else frag)
-                    tds.append(f"<td>{''.join(parts) or '&nbsp;'}</td>")
-                rows.append(f"<tr>{''.join(tds)}</tr>")
-            buf.append("<table border='1' cellspacing='0' cellpadding='6' style='border-collapse:collapse;width:100%'>"
-                       + "".join(rows) + "</table>")
+                # ---------- TABLE ----------
+                # On ferme les listes ouvertes avant d'insérer un tableau
+                while list_stack:
+                    buf.append(f"</{list_stack.pop()}>")
+        
+                rows = []
+                for row in block.rows:
+                    tds = []
+                    for cell in row.cells:
+                        parts = []
+                        for pp in cell.paragraphs:
+                            k, frag = _para_to_html(pp)
+                            parts.append(f"<ul>{frag}</ul>" if k.startswith("li") else frag)
+                        tds.append(f"<td>{''.join(parts) or '&nbsp;'}</td>")
+                    rows.append(f"<tr>{''.join(tds)}</tr>")
+                buf.append(
+                    "<table border='1' cellspacing='0' cellpadding='6' style='border-collapse:collapse;width:100%'>"
+                    + "".join(rows) + "</table>"
+                )
     flush()
     return sections
 
@@ -338,14 +429,16 @@ if uploaded is not None:
     # 3) Affichage vertical fidèle (HTML)
     st.header("Aperçu des sections (mise en forme préservée)")
     st.markdown("""
-    <style>
-      .sect p { margin: 0 0 10px 0; line-height: 1.55; }
-      .sect ul, .sect ol { margin: 6px 0 12px 1.4rem; }
-      .sect table { border-collapse: collapse; width: 100%; margin: 6px 0 12px 0; }
-      .sect td, .sect th { border: 1px solid #666; padding: 6px; vertical-align: top; }
-      .sect img { max-width: 100%; height: auto; display: inline-block; }
-    </style>
-    """, unsafe_allow_html=True)
+        <style>
+          .sect p { margin: 0 0 10px 0; line-height: 1.55; }
+          .sect ul, .sect ol { margin: 6px 0 12px 1.4rem; }
+          .sect ul ul, .sect ol ol, .sect ul ol, .sect ol ul { margin-left: 1.2rem; }
+          .sect table { border-collapse: collapse; width: 100%; margin: 6px 0 12px 0; }
+          .sect td, .sect th { border: 1px solid #666; padding: 6px; vertical-align: top; }
+          .sect img { max-width: 100%; height: auto; display: inline-block; }
+          .sect a { text-decoration: underline; }
+        </style>
+        """, unsafe_allow_html=True)
 
     for fdef in fields:
         key = fdef["key"]; label = fdef["label"]
