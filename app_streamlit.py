@@ -8,6 +8,8 @@ import streamlit as st
 from pathlib import Path
 from typing import Dict, List
 from docx import Document
+from streamlit.components.v1 import html as st_html
+
 
 # ---------------- Utils: headings + parsing ----------------
 
@@ -208,12 +210,21 @@ if uploaded is not None:
     
     # ====== Affichage VERTICAL des sections (HTML) ======
     st.header("Aperçu des sections (mise en forme préservée)")
+    CSS = """
+    <style>
+      .sect { padding: 8px 0; border-bottom: 1px solid rgba(128,128,128,.2); }
+      .sect h3 { margin: 0 0 6px 0; }
+      .sect ul, .sect ol { margin: 0.4rem 0 0.8rem 1.4rem; }
+      .sect table { border-collapse: collapse; width: 100%; margin: .4rem 0; }
+      .sect td, .sect th { border: 1px solid #666; padding: 6px; vertical-align: top; }
+      .sect img { max-width: 100%; height: auto; }
+      body, p, li, td { color: inherit; }
+    </style>
+    """
     for fdef in fields:
         key = fdef["key"]
         label = fdef["label"]
-        html = fr_payload.get(key, "")
-        with st.expander(f"{label} ({key})", expanded=True):
-            if html:
-                st.markdown(html, unsafe_allow_html=True)
-            else:
-                st.caption("Aucun contenu détecté pour cette section.")
+        html_content = fr_payload.get(key, "")
+        block = f"<div class='sect'><h3>{label}</h3>{html_content or '<p><em>(vide)</em></p>'}</div>"
+        st_html(CSS + block, height=min(2400, 150 + len(html_content)//3))
+
