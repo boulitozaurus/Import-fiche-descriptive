@@ -169,111 +169,95 @@ def _autolink_html(s: str) -> str:
 
 def _para_inner_html(p: Paragraph) -> str:
     """
-    Construit l'HTML du paragraphe en conservant les hyperliens ET les images/rich text.
-    - Cas 1 : <w:hyperlink r:id="..."><w:r>…</w:r></w:hyperlink>
-    - Cas 2 : <w:fldSimple w:instr="HYPERLINK ...">…</w:fldSimple>
-    - Cas 3 : champs HYPERLINK begin/instrText/separate/end dispersés dans des <w:r>
+    Construit l'HTML du paragraphe en conservant les hyperliens (externe, ancre, fldSimple)
+    ET les images/formatage. Robuste même si python-docx réétiquette les runs.
     """
-    # Map rapide CT_R -> Run python-docx
-    run_by_r = {run._r: run for run in p.runs}
+    def _url_from_rel(run, rid: str) -> str | None:
+        if not rid:
+            return None
+        try:
+            rel = run.part.rels.get(rid)
+            if rel is None:
+                return None
+            url = getattr(rel, "target_ref", None)
+            if not url:
+                tp = getattr(rel, "target_part", None)
+                if tp is not None and hasattr(tp, "partname"):
+                    url = str(tp.partname)
+            return str(url) if url else None
+        except Exception:
+            return None
 
-    frags = []
-
-    # État pour le cas 3 (champs HYPERLINK en plusieurs runs)
-    current_field_url = None
-    in_field_display = False
-
-    for el in p._p.iterchildren():
-        tag = el.tag
-
-        # ------- Cas 1 : <w:hyperlink> -------
-        if tag.endswith("}hyperlink"):
-            url = None
-            rid = el.get(qn("r:id"))
-            anchor = el.get(qn("w:anchor"))
-            if rid:
-                rel = p.part.rels.get(rid)
-                if rel is not None:
-                    url = getattr(rel, "target_ref", None)
-                    if not url:
-                        tp = getattr(rel, "target_part", None)
-                        if tp is not None and hasattr(tp, "partname"):
-                            url = str(tp.partname)
-            elif anchor:
-                url = f"#{anchor}"
-
-            inner = []
-            for r in el.iterchildren():
-                if r.tag.endswith("}r"):
-                    run = run_by_r.get(r)
-                    if run is not None:
-                        inner.append(_run_to_html(run))
-            inner_html = "".join(inner)
-            if url:
-                url_esc = _html_escape(str(url))
-                frags.append(f'<a href="{url_esc}" target="_blank" rel="noopener noreferrer">{inner_html}</a>')
-            else:
-                frags.append(inner_html)
-            continue
-
-        # ------- Cas 2 : <w:fldSimple w:instr="HYPERLINK ..."> -------
-        if tag.endswith("}fldSimple"):
-            instr = el.get(qn("w:instr")) or ""
-            m = re.search(r'HYPERLINK\s+"([^"]+)"', instr, flags=re.I) or re.search(r'HYPERLINK\s+(\S+)', instr, flags=re.I)
-            url = m.group(1) if m else None
-            inner = []
-            for r in el.iterchildren():
-                if r.tag.endswith("}r"):
-                    run = run_by_r.get(r)
-                    if run is not None:
-                        inner.append(_run_to_html(run))
-            inner_html = "".join(inner)
-            if url:
-                url_esc = _html_escape(str(url))
-                frags.append(f'<a href="{url_esc}" target="_blank" rel="noopener noreferrer">{inner_html}</a>')
-            else:
-                frags.append(inner_html)
-            continue
-
-        # ------- Cas 3 : flux de <w:r> avec field codes HYPERLINK -------
-        if tag.endswith("}r"):
-            r = el  # CT_R
-            # Met à jour l'état fieldcode
-            for child in r.iterchildren():
-                ctag = child.tag
-                if ctag.endswith("}fldChar"):
-                    ftype = child.get(qn("w:fldCharType"))
-                    if ftype == "begin":
-                        current_field_url = None
-                        in_field_display = False
-                    elif ftype == "separate":
-                        in_field_display = True
-                    elif ftype == "end":
-                        in_field_display = False
-                        current_field_url = None
-                elif ctag.endswith("}instrText"):
-                    instr = child.text or ""
+    def _url_via_ancestors(run) -> str | None:
+        """Monte depuis le run jusqu'au paragraphe et récupère un éventuel lien."""
+        try:
+            node = run._r
+            while node is not None and node is not p._p:
+                tag = node.tag
+                # <w:hyperlink r:id="..."> .. </w:hyperlink>
+                if tag.endswith("}hyperlink"):
+                    rid = node.get(qn("r:id"))
+                    if rid:
+                        return _url_from_rel(run, rid)
+                    anchor = node.get(qn("w:anchor"))
+                    if anchor:
+                        return f"#{anchor}"
+                # <w:fldSimple w:instr="HYPERLINK ...">
+                if tag.endswith("}fldSimple"):
+                    instr = node.get(qn("w:instr")) or ""
                     m = re.search(r'HYPERLINK\s+"([^"]+)"', instr, flags=re.I) or re.search(r'HYPERLINK\s+(\S+)', instr, flags=re.I)
                     if m:
-                        current_field_url = m.group(1)
+                        return m.group(1)
+                node = node.getparent()
+        except Exception:
+            pass
+        return None
 
-            run = run_by_r.get(r)
-            chunk = _run_to_html(run) if run is not None else ""
-            if chunk and in_field_display and current_field_url:
-                url_esc = _html_escape(str(current_field_url))
-                chunk = f'<a href="{url_esc}" target="_blank" rel="noopener noreferrer">{chunk}</a>'
-            frags.append(chunk)
-            continue
+    # État pour les champs HYPERLINK en 4 temps (begin / instrText / separate / end)
+    current_field_url: str | None = None
+    in_field_display: bool = False
 
-        # Autres balises dans le paragraphe : on ignore (bookmarks, etc.)
-        # (le texte n'est JAMAIS dans ces balises autrement)
-        continue
+    frags: list[str] = []
 
-    # Si rien capturé (cas extrême), fallback sur l'ancien chemin
+    for run in p.runs:
+        # 1) Mettre à jour l'état "field code" à partir des enfants du run
+        for child in run._r.iterchildren():
+            ctag = child.tag
+            if ctag.endswith("}fldChar"):
+                ftype = child.get(qn("w:fldCharType"))
+                if ftype == "begin":
+                    current_field_url = None
+                    in_field_display = False
+                elif ftype == "separate":
+                    in_field_display = True
+                elif ftype == "end":
+                    in_field_display = False
+                    current_field_url = None
+            elif ctag.endswith("}instrText"):
+                instr = child.text or ""
+                m = re.search(r'HYPERLINK\s+"([^"]+)"', instr, flags=re.I) or re.search(r'HYPERLINK\s+(\S+)', instr, flags=re.I)
+                if m:
+                    current_field_url = m.group(1)
+
+        # 2) HTML du run (texte formaté, images, <br/>)
+        chunk = _run_to_html(run)
+
+        # 3) URL via ancêtres (hyperlink/fldSimple) en priorité,
+        #    sinon via état des champs HYPERLINK (begin/separate/end)
+        url = _url_via_ancestors(run) or (current_field_url if in_field_display else None)
+
+        if url and chunk:
+            url_esc = _html_escape(str(url))
+            chunk = f'<a href="{url_esc}" target="_blank" rel="noopener noreferrer">{chunk}</a>'
+
+        frags.append(chunk)
+
+    # fallback si rien capturé
     if not frags:
-        return "".join(_run_to_html(run) for run in p.runs)
+        return "".join(_run_to_html(r) for r in p.runs)
 
     return "".join(frags)
+
 
 def _para_list_kind(p: Paragraph, text: str) -> str | None:
     """Renvoie 'ul', 'ol' ou None sans xpath."""
