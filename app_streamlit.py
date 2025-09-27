@@ -240,31 +240,83 @@ def _para_inner_html(p: Paragraph) -> str:
 
     return "".join(frags)
 
-def _para_list_kind(p: Paragraph, text: str) -> str | None:
-    """Renvoie 'ul', 'ol' ou None sans xpath."""
-    # 1) Numérotation Word native ?
+def _list_kind_from_numbering(p: Paragraph) -> str | None:
+    """Retourne 'ol' (numérotée) ou 'ul' (puces) si le paragraphe appartient à une liste Word."""
     try:
-        pPr = getattr(p._p, "pPr", None)
+        pPr  = getattr(p._p, "pPr", None)
         numPr = getattr(pPr, "numPr", None) if pPr is not None else None
-    except Exception:
-        numPr = None
-    if numPr is not None:
-        sname = (p.style.name if getattr(p, "style", None) else "") or ""
-        if "Number" in sname or re.match(r"^\s*\d+([.)]\s|$)", text or ""):
-            return "ol"
-        return "ul"
+        if numPr is None:
+            return None
 
-    # 2) Styles usuels
+        numId_el = getattr(numPr, "numId", None)
+        ilvl_el  = getattr(numPr, "ilvl", None)
+        numId = str(getattr(numId_el, "val", None)) if numId_el is not None else None
+        ilvl  = int(getattr(ilvl_el, "val", 0)) if ilvl_el is not None and getattr(ilvl_el, "val", None) is not None else 0
+        if not numId:
+            return None
+
+        np = getattr(p.part, "numbering_part", None)
+        if np is None:
+            return None
+        root = np.element
+
+        # 1) numId -> abstractNumId
+        abstract_id = None
+        for num in root.iterchildren():
+            if num.tag.endswith("}num") and num.get(qn("w:numId")) == numId:
+                for ch in num.iterchildren():
+                    if ch.tag.endswith("}abstractNumId"):
+                        abstract_id = ch.get(qn("w:val"))
+                        break
+                break
+        if abstract_id is None:
+            return None
+
+        # 2) abstractNumId -> numFmt (niveau ilvl si dispo)
+        fmt = None
+        for absn in root.iterchildren():
+            if absn.tag.endswith("}abstractNum") and absn.get(qn("w:abstractNumId")) == abstract_id:
+                # cherche le niveau exact
+                for lvl in absn.iterchildren():
+                    if lvl.tag.endswith("}lvl") and lvl.get(qn("w:ilvl")) == str(ilvl):
+                        for comp in lvl.iterchildren():
+                            if comp.tag.endswith("}numFmt"):
+                                fmt = (comp.get(qn("w:val")) or "").lower()
+                                break
+                        if fmt: break
+                # sinon prend le premier format trouvé
+                if not fmt:
+                    for lvl in absn.iterchildren():
+                        if lvl.tag.endswith("}lvl"):
+                            for comp in lvl.iterchildren():
+                                if comp.tag.endswith("}numFmt"):
+                                    fmt = (comp.get(qn("w:val")) or "").lower()
+                                    break
+                            if fmt: break
+                break
+
+        if not fmt:
+            return None
+        return "ul" if fmt == "bullet" else "ol"
+    except Exception:
+        return None
+
+def _para_list_kind(p: Paragraph, text: str) -> str | None:
+    """Renvoie 'ul', 'ol' ou None."""
+    kind = _list_kind_from_numbering(p)
+    if kind:
+        return kind
+
+    # Heuristiques de secours (si numbering non exploitable)
     sname = (p.style.name if getattr(p, "style", None) else "") or ""
+    if "Number" in sname or re.match(r"^\s*\d+([.)]\s|$)", text or ""):
+        return "ol"
     if any(k in sname for k in ["List", "Puces", "Bullet"]):
         return "ul"
-    if "Number" in sname:
-        return "ol"
-
-    # 3) Symbole en début
     if (text or "").lstrip().startswith(("•", "◦", "▪", "-", "–", "—", "*")):
         return "ul"
     return None
+
 
 def _para_list_info(p: Paragraph, text: str) -> tuple[str | None, int | None]:
     """('ul'/'ol', niveau>=0) ou (None, None). Niveau via numPr.ilvl, sinon heuristique indent."""
