@@ -1,6 +1,20 @@
 from typing import Dict, List
 from docx import Document
-import unicodedata
+
+def _strip_accents(x: str) -> str:
+    if x is None:
+        return ""
+    try:
+        import unicodedata  # import local, safe
+        nfkd = unicodedata.normalize("NFKD", x)
+        return "".join(ch for ch in nfkd if not unicodedata.combining(ch))
+    except Exception:
+        # fallback: on renvoie tel quel (les titres restent comparables en exact match)
+        return x
+
+def _norm(s: str) -> str:
+    return " ".join(_strip_accents((s or "")).lower().replace("’", "'").split())
+
 
 HEADING_STYLES = {"Heading 1","Heading 2","Heading 3","Titre 1","Titre 2","Titre 3","Title","Subtitle"}
 
