@@ -39,17 +39,20 @@ def docx_to_html(path: str) -> str:
     return result.value
 
 def split_sections_by_headings(html: str, expected_headings: list[str]) -> dict[str, str]:
-    # normalisation simple
+    # normalisation légère
     norm = lambda s: re.sub(r"\s+", " ", s).strip().lower().rstrip(" :")
     wanted = {norm(h): h for h in expected_headings}
-    soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
 
+    soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
     out = {h: "" for h in expected_headings}
+
     current = None
     for el in soup.div.children:
-        if getattr(el, "name", None) in {"h1","h2","h3","h4","h5","h6"}:
+        tag = getattr(el, "name", None)
+        if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
             key = wanted.get(norm(el.get_text()))
-            current = key if key else current
+            if key:
+                current = key
             continue
         if current:
             out[current] += str(el)
@@ -353,56 +356,6 @@ def _para_list_kind(p: Paragraph, text: str) -> str | None:
 
     return None
 
-def _para_list_info(p: Paragraph, text: str) -> tuple[str | None, int | None]:
-    """('ul'/'ol', niveau>=0) ou (None, None). Niveau via numPr.ilvl, sinon heuristique indent."""
-    kind = _para_list_kind(p, text)
-    if not kind:
-        return None, None
-    level = 0
-    try:
-        pPr = getattr(p._p, "pPr", None)
-        numPr = getattr(pPr, "numPr", None) if pPr is not None else None
-        ilvl = getattr(numPr, "ilvl", None) if numPr is not None else None
-        if ilvl is not None and getattr(ilvl, "val", None) is not None:
-            level = int(ilvl.val)
-        else:
-            ind = getattr(pPr, "ind", None) if pPr is not None else None
-            left = getattr(ind, "left", None) if ind is not None else None
-            if left is not None:
-                # 720 twips ~ 0.5", approximons un niveau par 720 twips
-                level = max(0, min(6, int(left) // 720))
-    except Exception:
-        pass
-    return kind, level
-
-def _para_to_html(p: Paragraph) -> tuple[str, str]:
-    """
-    Retourne ("p" | "li-ul" | "li-ol", html).
-    - Conserve styles (gras/italique/souligné/couleur), <br/>, images et liens.
-    - Détecte listes et retire le symbole de puce s'il est présent dans le texte.
-    """
-    # HTML interne du paragraphe (runs formatés + liens + images)
-    inner = _para_inner_html(p) or _html_escape(p.text or "")
-    # Auto-link des URLs brutes si Word n'a pas créé d'hyperlien
-    inner = _autolink_html(inner)
-
-    # Type de liste (ul/ol) + niveau (non utilisé ici, géré par la pile côté appelant)
-    kind, _ = _para_list_info(p, p.text or "")
-
-    if kind == "ol":
-        return ("li-ol", f"<li>{inner}</li>")
-
-    if kind == "ul":
-        # Si le symbole de puce fait partie du texte, on l’enlève pour éviter le doublon
-        for b in ("•", "◦", "▪", "-", "–", "—", "*"):
-            if inner.startswith(b):
-                inner = inner[len(b):].lstrip()
-                break
-        return ("li-ul", f"<li>{inner}</li>")
-
-    # Paragraphe standard
-    return ("p", f"<p>{inner}</p>")
-
 def _iter_blocks(parent):
     """Parcourt Paragraph/Table dans l'ordre d'apparition."""
     # Cas Document : il faut descendre dans le body
@@ -437,166 +390,32 @@ def _iter_blocks(parent):
         elif isinstance(child, CT_Tbl):
             yield Table(child, parent)
 
-def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, str]:
-    doc = Document(path)
+# pour garder la liste des images non supportées (EMF/WMF) à proposer en téléchargement
+if "unsupported_images" not in st.session_state:
+    st.session_state["unsupported_images"] = []
 
-    exp = {_norm(h): h for h in expected_headings}
-    exp.update({_norm(h.rstrip(":")): h for h in expected_headings})
+def _image_handler(image: mammoth.images.Image) -> dict:
+    """Mammoth: renvoie un dict avec 'src' (data URI). EMF/WMF => on stocke pour download."""
+    data = image.read()
+    ctype = image.content_type or "application/octet-stream"
 
-    sections: dict[str, str] = {}
-    current: str | None = None
-    buf: list[str] = []
+    # EMF/WMF/unknown: pas affichables par le navigateur
+    if ctype in ("image/x-emf", "image/x-wmf", "application/octet-stream"):
+        fname = f"{uuid.uuid4().hex}.emf" if "emf" in ctype or ctype == "application/octet-stream" else f"{uuid.uuid4().hex}.wmf"
+        st.session_state["unsupported_images"].append((fname, data, ctype))
+        # petit transparent 1x1 en attendant + alt explicite
+        return {"src": "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
+                "alt": "Image non affichable (format EMF/WMF). Téléchargement dispo plus bas."}
 
-    list_stack: list[dict] = []     # [{"tag":"ol","numId":"7"}, {"tag":"ul","numId":None}]
-    restart_ol_hint: bool = False
+    # images “classiques” => inline en base64
+    b64 = base64.b64encode(data).decode("ascii")
+    return {"src": f"data:{ctype};base64,{b64}"}
 
-    def _numref(p: Paragraph) -> tuple[str | None, int | None]:
-        try:
-            pPr  = getattr(p._p, "pPr", None)
-            numPr = getattr(pPr, "numPr", None) if pPr is not None else None
-            if numPr is None: return None, None
-            numId_el = getattr(numPr, "numId", None)
-            ilvl_el  = getattr(numPr, "ilvl", None)
-            numId = str(getattr(numId_el, "val", None)) if numId_el is not None else None
-            ilvl  = int(getattr(ilvl_el, "val", 0)) if ilvl_el is not None and getattr(ilvl_el, "val", None) is not None else 0
-            return numId, ilvl
-        except Exception:
-            return None, None
-
-    def _append_inside_last_li(html_fragment: str, as_cont: bool = False) -> bool:
-        frag = html_fragment
-        if as_cont and frag.startswith("<p"):
-            if frag.startswith("<p>"):
-                frag = '<p class="cont">' + frag[3:]
-            elif frag.startswith("<p "):
-                frag = frag.replace("<p ", '<p class="cont" ', 1)
-        for i in range(len(buf) - 1, -1, -1):
-            s = buf[i]; j = s.rfind("</li>")
-            if j != -1:
-                buf[i] = s[:j] + frag + s[j:]
-                return True
-        return False
-
-    def flush() -> None:
-        nonlocal buf, current, list_stack, restart_ol_hint
-        while list_stack:
-            buf.append(f"</{list_stack.pop()['tag']}>")
-        if current and buf:
-            html = "".join(buf).strip()
-            if html:
-                sections[current] = (sections.get(current, "") + html)
-        buf = []
-        restart_ol_hint = False
-
-    for block in _iter_blocks(doc):
-        if isinstance(block, Paragraph):
-            t = (block.text or "").strip()
-
-            # Nouveau titre/section
-            if t and _looks_like_heading(t, block, exp):
-                while list_stack:
-                    buf.append(f"</{list_stack.pop()['tag']}>")
-                flush()
-                current = exp.get(_norm(t), exp.get(_norm(t.rstrip(":")), t))
-                restart_ol_hint = True
-                continue
-
-            kind, level = _para_list_info(block, block.text or "")
-            numId, _ilvl = _numref(block)
-            manual_start1 = bool(re.match(r'^\s*1[.)]\s', block.text or ""))
-
-            # UL stricte : on n'accepte PAS une 'fausse' puce (pas de numPr)
-            if kind == "ul" and numId is None:
-                kind = None
-
-            # UL juste après OL : autoriser l'UL imbriquée ; si Word renvoie ilvl=0, on force l'imbrication
-            if kind == "ul" and list_stack and list_stack[-1]["tag"] == "ol":
-                if level is None or (level or 0) == 0:
-                    level = len(list_stack)  # sous-niveau visuel
-
-            if kind is None:
-                if list_stack and list_stack[-1]["tag"] == "ol":
-                    # paragraphe explicatif du point courant
-                    _, p_html = _para_to_html(block)
-                    _append_inside_last_li(p_html, as_cont=True)
-                else:
-                    buf.append(_para_to_html(block)[1])
-                    if t.endswith(":"):
-                        restart_ol_hint = True
-                continue
-
-            # profondeur cible (0 => 1 liste ouverte)
-            target_depth = (level or 0) + 1
-
-            # Redémarrage d'un OL après un titre / intro ':'
-            section_restart = (kind == "ol" and restart_ol_hint and target_depth == 1)
-
-            # Si une liste existe à cette profondeur, on redémarre si numId change / "1." manuel
-            if target_depth <= len(list_stack):
-                    at_depth = list_stack[target_depth - 1]
-                    if kind == "ol":
-                            manual_restart = (numId is None and manual_start1 and at_depth.get("tag") == "ol")
-                            if section_restart or manual_restart:
-                                    while len(list_stack) >= target_depth:
-                                            buf.append(f"</{list_stack.pop()['tag']}>")
-
-            # Réduire la profondeur si besoin
-            while len(list_stack) > target_depth:
-                buf.append(f"</{list_stack.pop()['tag']}>")
-
-            # Ouvrir jusqu'à la profondeur voulue
-            while len(list_stack) < target_depth:
-                open_level = len(list_stack)
-                to_open = kind if open_level + 1 == target_depth else "ul"
-                if to_open == "ol":
-                    buf.append("<ol>")
-                    list_stack.append({"tag": "ol", "numId": numId})
-                else:
-                    buf.append("<ul>")
-                    list_stack.append({"tag": "ul", "numId": None})
-
-            # Corriger le type si besoin
-            if list_stack and list_stack[-1]["tag"] != kind:
-                buf.append(f"</{list_stack.pop()['tag']}>")
-                if kind == "ol":
-                    buf.append("<ol>"); list_stack.append({"tag": "ol", "numId": numId})
-                else:
-                    buf.append("<ul>"); list_stack.append({"tag": "ul", "numId": None})
-
-            # Ajoute l’item
-            _, li_html = _para_to_html(block)
-            buf.append(li_html)
-
-            # Aligner numId si fourni
-            if kind == "ol" and list_stack and list_stack[-1]["tag"] == "ol" and list_stack[-1].get("numId") is None and numId is not None:
-                list_stack[-1]["numId"] = numId
-
-            restart_ol_hint = False
-            continue
-
-        if isinstance(block, Table):
-            while list_stack:
-                buf.append(f"</{list_stack.pop()['tag']}>")
-            rows_html: list[str] = []
-            for row in block.rows:
-                cells_html: list[str] = []
-                for cell in row.cells:
-                    cell_parts: list[str] = []
-                    for pp in cell.paragraphs:
-                        k, frag = _para_to_html(pp)
-                        cell_parts.append(f"<ul>{frag}</ul>" if k.startswith("li") else frag)
-                    cells_html.append(f"<td>{''.join(cell_parts) or '&nbsp;'}</td>")
-                rows_html.append(f"<tr>{''.join(cells_html)}</tr>")
-            buf.append(
-                "<table border='1' cellspacing='0' cellpadding='6' style='border-collapse:collapse;width:100%'>"
-                + "".join(rows_html)
-                + "</table>"
-            )
-            restart_ol_hint = True
-            continue
-
-    flush()
-    return sections
+def docx_to_html(path: str) -> str:
+    """Convertit le .docx en HTML avec mise en forme/puces/numérotation correcte."""
+    with open(path, "rb") as f:
+        result = mammoth.convert_to_html(f, convert_image=mammoth.images.inline(_image_handler))
+    return result.value  # HTML (sans <html>/<body>), c’est normal
 
 # ---------------- Load schema + fixed heading map ----------------
 
@@ -708,19 +527,17 @@ if uploaded is not None:
 
     # 3) Affichage vertical fidèle (HTML)
     st.header("Aperçu des sections (mise en forme préservée)")
+    def inject_css():
     st.markdown("""
-        <style>
-          .sect p { margin:.35rem 0; }
-          .sect ol, .sect ul { margin:.35rem 0 .55rem 1.4rem; padding-left:1.4rem; list-style-position:outside; }
-          .sect li { margin:.15rem 0; }
-          /* <<< AJOUT pour éviter le décalage des paragraphes CONTINUATION dans un <li> */
-          .sect li p.cont { margin:.25rem 0 .35rem 0; margin-left:0; text-indent:0; }
-          /* si tu veux que ça s’aligne exactement sous le texte après l’index "1." :
-             remplace par: margin-left:-1.4rem; (à ajuster selon le padding-left ci-dessus) */
-          .sect table{ width:100%; border-collapse:collapse }
-          .sect td,.sect th{ border:1px solid #ccc; padding:6px }
-        </style>
-        """, unsafe_allow_html=True)
+            <style>
+              .sect p { margin:.35rem 0; }
+              .sect ol, .sect ul { margin:.35rem 0 .55rem 1.4rem; padding-left:1.4rem; list-style-position:outside; }
+              .sect li { margin:.15rem 0; }
+              /* paragraphes “explicatifs” insérés par Word dans le même point: Mammoth les garde bien */
+              .sect table { width:100%; border-collapse:collapse; }
+              .sect td, .sect th { border:1px solid #ccc; padding:6px; }
+            </style>
+            """, unsafe_allow_html=True)
 
 
     for fdef in fields:
