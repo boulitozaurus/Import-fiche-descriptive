@@ -196,6 +196,7 @@ fields = schema.get("fields", [])
 key_by_pdf_label_norm = {norm(f["label"]): f["key"] for f in fields}
 nl_key_by_key = {f["key"]: f.get("nl_key") for f in fields}
 word_to_pdf = load_heading_map()
+expected_word_headings = list(word_to_pdf.keys())
 
 # Upload
 st.header("1) Charger la fiche .docx")
@@ -206,7 +207,7 @@ if uploaded is not None:
     with open(tmp_path, "wb") as f:
         f.write(uploaded.read())
 
-    sections = parse_docx_sections(tmp_path)
+    sections = parse_docx_sections(tmp_path, expected_headings=expected_word_headings)
     sections_norm = {norm(k): v for k, v in sections.items()}
 
     # Auto-map FR payload
