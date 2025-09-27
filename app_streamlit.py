@@ -301,21 +301,26 @@ def _list_kind_from_numbering(p: Paragraph) -> str | None:
         return None
 
 def _para_list_kind(p: Paragraph, text: str) -> str | None:
-    """Renvoie 'ul', 'ol' ou None."""
+    """Renvoie 'ul', 'ol' ou None.
+
+    Priorité à la numérotation native de Word (numbering.xml).
+    Fallbacks très prudents :
+      - 'ol' uniquement si le texte commence par '1.' / '1) ...'
+      - 'ul' uniquement si le texte commence par un vrai symbole de puce.
+    """
     kind = _list_kind_from_numbering(p)
     if kind:
         return kind
 
-    # Heuristiques de secours (si numbering non exploitable)
-    sname = (p.style.name if getattr(p, "style", None) else "") or ""
-    if "Number" in sname or re.match(r"^\s*\d+([.)]\s|$)", text or ""):
+    t = (text or "")
+    # OL manuel (ex: "1. ...", "2) ...")
+    if re.match(r'^\s*\d+[.)]\s', t):
         return "ol"
-    if any(k in sname for k in ["List", "Puces", "Bullet"]):
+    # UL manuel (vrai symbole de puce tapé)
+    if t.lstrip().startswith(("•", "◦", "▪", "-", "–", "—", "*")):
         return "ul"
-    if (text or "").lstrip().startswith(("•", "◦", "▪", "-", "–", "—", "*")):
-        return "ul"
-    return None
 
+    return None
 
 def _para_list_info(p: Paragraph, text: str) -> tuple[str | None, int | None]:
     """('ul'/'ol', niveau>=0) ou (None, None). Niveau via numPr.ilvl, sinon heuristique indent."""
@@ -402,14 +407,6 @@ def _iter_blocks(parent):
             yield Table(child, parent)
 
 def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, str]:
-    """
-    - OL: continuité de numérotation; paragraphs explicatifs insérés dans le <li> courant (p.cont).
-    - UL: seulement si Word fournit une numérotation native (numPr). Sinon => paragraphe normal.
-    - UL 'suspect' rencontré dans un OL => on l'insère dans le <li> courant (pas de nouvelle <ul>).
-    - Restart propre d'un OL après titre / intro finissant par ':' ou si numId Word change.
-    - Tableaux Word -> <table>.
-    Prérequis : _norm, _looks_like_heading, _iter_blocks, _para_list_info, _para_to_html.
-    """
     doc = Document(path)
 
     exp = {_norm(h): h for h in expected_headings}
@@ -419,16 +416,14 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
     current: str | None = None
     buf: list[str] = []
 
-    # pile des listes ouvertes (avec numId si Word numérote)
-    list_stack: list[dict] = []     # ex: [{"tag":"ol","numId":"7"}, {"tag":"ul","numId":None}]
-    restart_ol_hint: bool = False   # après titre / intro ":" => prochain OL top-level repart à 1
+    list_stack: list[dict] = []     # [{"tag":"ol","numId":"7"}, {"tag":"ul","numId":None}]
+    restart_ol_hint: bool = False
 
     def _numref(p: Paragraph) -> tuple[str | None, int | None]:
         try:
-            pPr = getattr(p._p, "pPr", None)
+            pPr  = getattr(p._p, "pPr", None)
             numPr = getattr(pPr, "numPr", None) if pPr is not None else None
-            if numPr is None:
-                return None, None
+            if numPr is None: return None, None
             numId_el = getattr(numPr, "numId", None)
             ilvl_el  = getattr(numPr, "ilvl", None)
             numId = str(getattr(numId_el, "val", None)) if numId_el is not None else None
@@ -463,12 +458,10 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
         restart_ol_hint = False
 
     for block in _iter_blocks(doc):
-
-        # -------- Paragraphe --------
         if isinstance(block, Paragraph):
             t = (block.text or "").strip()
 
-            # Titre -> nouvelle section
+            # Nouveau titre/section
             if t and _looks_like_heading(t, block, exp):
                 while list_stack:
                     buf.append(f"</{list_stack.pop()['tag']}>")
@@ -481,13 +474,14 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
             numId, _ilvl = _numref(block)
             manual_start1 = bool(re.match(r'^\s*1[.)]\s', block.text or ""))
 
-            # UL "strict" : si Word ne fournit PAS de numPr => PAS de <ul>
+            # UL stricte : on n'accepte PAS une 'fausse' puce (pas de numPr)
             if kind == "ul" and numId is None:
                 kind = None
 
-            # UL juste après OL (Word renvoie parfois ilvl=0) -> pas de vraie <ul>: l'explication reste dans le <li>
+            # UL juste après OL : autoriser l'UL imbriquée ; si Word renvoie ilvl=0, on force l'imbrication
             if kind == "ul" and list_stack and list_stack[-1]["tag"] == "ol":
-                kind = None
+                if level is None or (level or 0) == 0:
+                    level = len(list_stack)  # sous-niveau visuel
 
             if kind is None:
                 if list_stack and list_stack[-1]["tag"] == "ol":
@@ -495,7 +489,6 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
                     _, p_html = _para_to_html(block)
                     _append_inside_last_li(p_html, as_cont=True)
                 else:
-                    # paragraphe normal bord gauche
                     buf.append(_para_to_html(block)[1])
                     if t.endswith(":"):
                         restart_ol_hint = True
@@ -504,10 +497,10 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
             # profondeur cible (0 => 1 liste ouverte)
             target_depth = (level or 0) + 1
 
-            # restart si titre/intro ':' et OL de niveau 0
+            # Redémarrage d'un OL après un titre / intro ':'
             section_restart = (kind == "ol" and restart_ol_hint and target_depth == 1)
 
-            # si une liste existe déjà à cette profondeur, vérifier redémarrage OL
+            # Si une liste existe à cette profondeur, on redémarre si numId change / "1." manuel
             if target_depth <= len(list_stack):
                 at_depth = list_stack[target_depth - 1]
                 if kind == "ol":
@@ -517,11 +510,11 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
                         while len(list_stack) >= target_depth:
                             buf.append(f"</{list_stack.pop()['tag']}>")
 
-            # réduction de profondeur
+            # Réduire la profondeur si besoin
             while len(list_stack) > target_depth:
                 buf.append(f"</{list_stack.pop()['tag']}>")
 
-            # ouverture jusqu'à profondeur cible
+            # Ouvrir jusqu'à la profondeur voulue
             while len(list_stack) < target_depth:
                 open_level = len(list_stack)
                 to_open = kind if open_level + 1 == target_depth else "ul"
@@ -532,32 +525,28 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
                     buf.append("<ul>")
                     list_stack.append({"tag": "ul", "numId": None})
 
-            # correction de type au niveau courant si besoin
+            # Corriger le type si besoin
             if list_stack and list_stack[-1]["tag"] != kind:
                 buf.append(f"</{list_stack.pop()['tag']}>")
                 if kind == "ol":
-                    buf.append("<ol>")
-                    list_stack.append({"tag": "ol", "numId": numId})
+                    buf.append("<ol>"); list_stack.append({"tag": "ol", "numId": numId})
                 else:
-                    buf.append("<ul>")
-                    list_stack.append({"tag": "ul", "numId": None})
+                    buf.append("<ul>"); list_stack.append({"tag": "ul", "numId": None})
 
-            # ajoute l'item
+            # Ajoute l’item
             _, li_html = _para_to_html(block)
             buf.append(li_html)
 
-            # aligne numId si fourni
+            # Aligner numId si fourni
             if kind == "ol" and list_stack and list_stack[-1]["tag"] == "ol" and list_stack[-1].get("numId") is None and numId is not None:
                 list_stack[-1]["numId"] = numId
 
             restart_ol_hint = False
             continue
 
-        # -------- Tableau --------
         if isinstance(block, Table):
             while list_stack:
                 buf.append(f"</{list_stack.pop()['tag']}>")
-
             rows_html: list[str] = []
             for row in block.rows:
                 cells_html: list[str] = []
@@ -568,7 +557,6 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
                         cell_parts.append(f"<ul>{frag}</ul>" if k.startswith("li") else frag)
                     cells_html.append(f"<td>{''.join(cell_parts) or '&nbsp;'}</td>")
                 rows_html.append(f"<tr>{''.join(cells_html)}</tr>")
-
             buf.append(
                 "<table border='1' cellspacing='0' cellpadding='6' style='border-collapse:collapse;width:100%'>"
                 + "".join(rows_html)
