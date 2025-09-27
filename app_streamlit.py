@@ -8,7 +8,8 @@ import streamlit as st
 from pathlib import Path
 from typing import Dict, List
 from streamlit.components.v1 import html as st_html
-
+import mammoth
+from bs4 import BeautifulSoup
 
 # ---------------- Utils: headings + parsing ----------------
 from docx import Document
@@ -24,6 +25,36 @@ HEADING_STYLES = {"Heading 1","Heading 2","Heading 3","Titre 1","Titre 2","Titre
 NS_W = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
 NS_A = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main",
         "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships"}
+
+def _data_uri(image):
+    data = base64.b64encode(image.read()).decode("ascii")
+    return {"src": f"data:{image.content_type};base64,{data}"}
+
+def docx_to_html(path: str) -> str:
+    with open(path, "rb") as f:
+        result = mammoth.convert_to_html(
+            f,
+            convert_image=mammoth.images.inline(_data_uri)
+        )
+    return result.value
+
+def split_sections_by_headings(html: str, expected_headings: list[str]) -> dict[str, str]:
+    # normalisation simple
+    norm = lambda s: re.sub(r"\s+", " ", s).strip().lower().rstrip(" :")
+    wanted = {norm(h): h for h in expected_headings}
+    soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
+
+    out = {h: "" for h in expected_headings}
+    current = None
+    for el in soup.div.children:
+        if getattr(el, "name", None) in {"h1","h2","h3","h4","h5","h6"}:
+            key = wanted.get(norm(el.get_text()))
+            current = key if key else current
+            continue
+        if current:
+            out[current] += str(el)
+
+    return out
 
 def _strip_accents(x: str) -> str:
     if x is None: return ""
@@ -681,15 +712,13 @@ if uploaded is not None:
     st.markdown("""
         <style>
           .sect p { margin:.35rem 0; }
-          .sect ol, .sect ul { margin:.35rem 0 .55rem 1.4rem; padding-left:1.4rem; list-style-position: outside; }
+          .sect ol, .sect ul { margin:.35rem 0 .55rem 1.4rem; padding-left:1.4rem; list-style-position:outside; }
           .sect li { margin:.15rem 0; }
-          /* paragraphes d'explication insérés dans le <li> courant (numérotation conservée, visuel 'plein gauche') */
-          .sect li p.cont { margin:.25rem 0; padding-left:0; margin-left:-1.4rem; text-indent:0; }
-          /* tables */
-          .sect table { width:100%; border-collapse:collapse; }
-          .sect table td, .sect table th { border:1px solid #ccc; padding:6px; }
+          .sect table{ width:100%; border-collapse:collapse }
+          .sect td,.sect th{ border:1px solid #ccc; padding:6px }
         </style>
         """, unsafe_allow_html=True)
+
 
     for fdef in fields:
         key = fdef["key"]; label = fdef["label"]
