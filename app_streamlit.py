@@ -713,6 +713,10 @@ if uploaded is not None:
           .sect p { margin:.35rem 0; }
           .sect ol, .sect ul { margin:.35rem 0 .55rem 1.4rem; padding-left:1.4rem; list-style-position:outside; }
           .sect li { margin:.15rem 0; }
+          /* <<< AJOUT pour éviter le décalage des paragraphes CONTINUATION dans un <li> */
+          .sect li p.cont { margin:.25rem 0 .35rem 0; margin-left:0; text-indent:0; }
+          /* si tu veux que ça s’aligne exactement sous le texte après l’index "1." :
+             remplace par: margin-left:-1.4rem; (à ajuster selon le padding-left ci-dessus) */
           .sect table{ width:100%; border-collapse:collapse }
           .sect td,.sect th{ border:1px solid #ccc; padding:6px }
         </style>
