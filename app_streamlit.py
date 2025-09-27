@@ -406,7 +406,7 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
     Lit le .docx et renvoie {heading: HTML}, en respectant l'ordre du document.
     - Détecte les titres via expected_headings et/ou styles Heading.
     - Conserve le formatage (gras/italique/souligné/couleurs), <br/>, images (base64) et liens.
-    - Gère listes imbriquées (<ul>/<ol>) + continuité des <ol> (start=...).
+    - Gère listes imbriquées (<ul>/<ol>) + continuité des <ol> même avec des paragraphes intercalés.
     - Convertit les tableaux en <table>.
     Prérequis : _norm, _looks_like_heading, _iter_blocks, _para_list_info, _para_to_html.
     """
@@ -421,11 +421,23 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
     buf: list[str] = []
     list_stack: list[str] = []          # pile des balises ouvertes: ["ul", "ol", ...]
     ol_counters: dict[int, int] = {}    # compteur par niveau pour les listes ordonnées
+    ol_next_value: dict[int, int] = {}  # valeur à appliquer au 1er <li> d’un <ol> rouvert
 
-    def flush():
+    def _cleanup_counters(depth: int) -> None:
+        """Supprime les compteurs des niveaux >= depth (quand on remonte d'un niveau)."""
+        for lvl in list(ol_counters.keys()):
+            if lvl >= depth:
+                del ol_counters[lvl]
+
+    def _cleanup_nextvals(depth: int) -> None:
+        """Purge les 'value à appliquer au prochain <li>' pour les niveaux >= depth."""
+        for lvl in list(ol_next_value.keys()):
+            if lvl >= depth:
+                del ol_next_value[lvl]
+
+    def flush() -> None:
         """Clôture la section courante (ferme listes + pousse le HTML dans sections)."""
-        nonlocal buf, current, list_stack, ol_counters
-        # ferme toutes les listes ouvertes
+        nonlocal buf, current, list_stack, ol_counters, ol_next_value
         while list_stack:
             buf.append(f"</{list_stack.pop()}>")
         if current and buf:
@@ -435,12 +447,7 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
         buf = []
         # nouvelle section => on remet les compteurs à zéro
         ol_counters.clear()
-
-    def _cleanup_counters(depth: int):
-        """Supprime les compteurs des niveaux >= depth (quand on remonte d'un niveau)."""
-        for lvl in list(ol_counters.keys()):
-            if lvl >= depth:
-                del ol_counters[lvl]
+        ol_next_value.clear()
 
     for block in _iter_blocks(doc):
         # ---------------- Paragraphe ----------------
@@ -473,15 +480,17 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
             while len(list_stack) > target_depth:
                 buf.append(f"</{list_stack.pop()}>")
             _cleanup_counters(len(list_stack))
+            _cleanup_nextvals(len(list_stack))
 
             # Ouverture : ajoute des listes jusqu'à la profondeur cible
             while len(list_stack) < target_depth:
                 open_level = len(list_stack)  # 0, 1, 2, ...
                 to_open = kind if open_level + 1 == target_depth else "ul"
                 if to_open == "ol":
+                    # calcule le numéro à afficher sur le 1er <li> de ce nouvel <ol>
                     start = ol_counters.get(open_level, 0) + 1
-                    start_attr = f' start="{start}"' if start > 1 else ""
-                    buf.append(f"<ol{start_attr}>")
+                    buf.append("<ol>")                 # pas d'attribut start ici
+                    ol_next_value[open_level] = start  # sera appliqué au 1er <li>
                 else:
                     buf.append("<ul>")
                 list_stack.append(to_open)
@@ -492,14 +501,22 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
                 open_level = len(list_stack)
                 if kind == "ol":
                     start = ol_counters.get(open_level, 0) + 1
-                    start_attr = f' start="{start}"' if start > 1 else ""
-                    buf.append(f"<ol{start_attr}>")
+                    buf.append("<ol>")
+                    ol_next_value[open_level] = start
                 else:
                     buf.append("<ul>")
                 list_stack.append(kind)
 
             # Ajoute l'item
             _, li_html = _para_to_html(block)
+
+            # Si on vient d’ouvrir un <ol> et qu’on doit reprendre à N>1, on met <li value="N">
+            if kind == "ol":
+                lvl = level or 0
+                start_for_this_li = ol_next_value.pop(lvl, None)
+                if start_for_this_li and start_for_this_li > 1 and li_html.startswith("<li>"):
+                    li_html = f'<li value="{start_for_this_li}">' + li_html[4:]
+
             buf.append(li_html)
 
             # Incrémente le compteur pour les <ol>
@@ -532,7 +549,7 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
                 + "".join(rows_html)
                 + "</table>"
             )
-            # on continue (les compteurs <ol> restent en mémoire pour reprendre plus loin)
+            # (les compteurs <ol> restent en mémoire pour reprendre plus loin)
             continue
 
         # autres types de blocs : ignorés
