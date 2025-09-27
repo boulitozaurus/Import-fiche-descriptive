@@ -248,7 +248,7 @@ st.caption("Déposez votre fiche .docx : mapping fixe Word→PDF/CRM")
 # Load schema + map
 schema = load_schema()
 fields = schema.get("fields", [])
-key_by_pdf_label_norm = {norm(f["label"]): f["key"] for f in fields}
+key_by_pdf_label_norm = {_norm(f["label"]): f["key"] for f in fields}
 nl_key_by_key = {f["key"]: f.get("nl_key") for f in fields}
 word_to_pdf = load_heading_map()
 expected_word_headings = list(word_to_pdf.keys())
@@ -263,14 +263,14 @@ if uploaded is not None:
 
     # 1) Parser HTML robuste
     sections = parse_docx_sections_html(tmp_path, expected_headings=expected_word_headings)
-    sections_norm = {norm(k): v for k, v in sections.items()}
+    sections_norm = {_norm(k): v for k, v in sections.items()}
 
     # 2) Auto-mapping Word -> PDF/CRM (valeurs = HTML)
     fr_payload = {}
     rows = []
     for word_h, pdf_h in word_to_pdf.items():
-        w_norm = norm(word_h); w_norm2 = norm(word_h.rstrip(":"))
-        target_key = key_by_pdf_label_norm.get(norm(pdf_h))
+        w_norm = _norm(word_h); w_norm2 = _norm(word_h.rstrip(":"))
+        target_key = key_by_pdf_label_norm.get(_norm(pdf_h))
         found = (w_norm in sections_norm) or (w_norm2 in sections_norm)
         fr_html = sections_norm.get(w_norm) or sections_norm.get(w_norm2, "")
         if target_key: fr_payload[target_key] = fr_html
