@@ -533,13 +533,12 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
 
             # Si une liste existe à cette profondeur, on redémarre si numId change / "1." manuel
             if target_depth <= len(list_stack):
-                at_depth = list_stack[target_depth - 1]
-                if kind == "ol":
-                    different_num_id = (numId is not None and at_depth.get("numId") != numId)
-                    manual_restart   = (numId is None and manual_start1 and at_depth.get("tag") == "ol")
-                    if section_restart or different_num_id or manual_restart:
-                        while len(list_stack) >= target_depth:
-                            buf.append(f"</{list_stack.pop()['tag']}>")
+                    at_depth = list_stack[target_depth - 1]
+                    if kind == "ol":
+                            manual_restart = (numId is None and manual_start1 and at_depth.get("tag") == "ol")
+                            if section_restart or manual_restart:
+                                    while len(list_stack) >= target_depth:
+                                            buf.append(f"</{list_stack.pop()['tag']}>")
 
             # Réduire la profondeur si besoin
             while len(list_stack) > target_depth:
