@@ -68,11 +68,37 @@ def _wrap_styles(run, txt: str) -> str:
     return f"{open_tags}{txt}{close_tags}"
 
 def _run_image_dataurl(run) -> str | None:
+    """Retourne une data-URI si une image est présente dans ce run.
+       Gère w:drawing/a:blip (modernes) ET w:pict/v:imagedata (hérités)."""
     try:
-        blips = run._r.xpath(".//a:blip/@r:embed", namespaces={**NS_A})
-        if not blips: return None
-        part = run.part.related_parts[blips[0]]
+        def find_rid(el):
+            # recherche récursive d'un rId pour l'image
+            for child in el.iterchildren():
+                tag = child.tag
+                # Cas moderne: a:blip r:embed="rIdX"
+                if tag.endswith("}blip"):
+                    rid = child.get(qn("r:embed"))
+                    if rid:
+                        return rid
+                # Cas hérité: v:imagedata r:id="rIdX"
+                if tag.endswith("}imagedata"):
+                    rid = child.get(qn("r:id"))
+                    if rid:
+                        return rid
+                # descente récursive
+                rid = find_rid(child)
+                if rid:
+                    return rid
+            return None
+
+        rId = find_rid(run._r)
+        if not rId:
+            return None
+        part = run.part.related_parts.get(rId)
+        if not part:
+            return None
         ctype = getattr(part, "content_type", "image/png")
+        import base64
         b64 = base64.b64encode(part.blob).decode("ascii")
         return f"data:{ctype};base64,{b64}"
     except Exception:
@@ -120,17 +146,64 @@ def _hyperlink_map(p: Paragraph) -> dict:
     return m
 
 def _para_inner_html(p: Paragraph) -> str:
-    """Constitue l'HTML interne d'un paragraphe en conservant <a href> autour des runs dans les hyperliens."""
-    link_by_run = _hyperlink_map(p)
+    """Construit l'HTML d'un paragraphe en conservant <a href>:
+       - cas moderne: <w:hyperlink r:id="..."><w:r>...</w:r></w:hyperlink>
+       - cas hérités: champs HYPERLINK (fldChar/instrText/separate/end)."""
+    # 1) map des runs contenus dans <w:hyperlink>
+    link_by_run = {}
+    try:
+        for hl in p._p.iterchildren():
+            if hl.tag.endswith("}hyperlink"):
+                r_id = hl.get(qn("r:id"))
+                url = None
+                if r_id:
+                    rel = p.part.rels.get(r_id)
+                    if rel is not None:
+                        url = getattr(rel, "target_ref", None) or getattr(rel, "target_part", None)
+                        if hasattr(url, "partname"):
+                            url = str(url.partname)
+                for r in hl.iterchildren():
+                    if r.tag.endswith("}r"):
+                        link_by_run[r] = url
+    except Exception:
+        pass
+
+    # 2) état pour champs HYPERLINK
+    current_field_url = None
+    in_field_display = False
+
     frags = []
     for run in p.runs:
-        chunk = _run_to_html(run)
-        url = link_by_run.get(run._r)
+        # met à jour l'état en lisant les noeuds XML du run (fldChar/instrText)
+        for child in run._r.iterchildren():
+            tag = child.tag
+            if tag.endswith("}fldChar"):
+                ftype = child.get(qn("w:fldCharType"))
+                if ftype == "begin":
+                    current_field_url = None
+                    in_field_display = False
+                elif ftype == "separate":
+                    # à partir d'ici, le texte affiché fait partie du lien
+                    in_field_display = True
+                elif ftype == "end":
+                    in_field_display = False
+                    current_field_url = None
+            elif tag.endswith("}instrText"):
+                instr = child.text or ""
+                # HYPERLINK "https://..."   ou   HYPERLINK https://...
+                m = re.search(r'HYPERLINK\s+"([^"]+)"', instr, flags=re.I) or re.search(r'HYPERLINK\s+(\S+)', instr, flags=re.I)
+                if m:
+                    current_field_url = m.group(1)
+
+        chunk = _run_to_html(run)  # gère aussi les images
+        url = link_by_run.get(run._r) or (current_field_url if in_field_display else None)
         if url:
             url_esc = _html_escape(str(url))
             chunk = f'<a href="{url_esc}" target="_blank" rel="noopener noreferrer">{chunk}</a>'
         frags.append(chunk)
+
     return "".join(frags)
+
 
 def _para_list_kind(p: Paragraph, text: str) -> str | None:
     """Renvoie 'ul', 'ol' ou None sans xpath."""
