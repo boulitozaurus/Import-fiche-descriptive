@@ -1,19 +1,46 @@
-
-from typing import Dict, List, Tuple
+from typing import Dict, List
 from docx import Document
+import unicodedata
 
 HEADING_STYLES = {"Heading 1","Heading 2","Heading 3","Titre 1","Titre 2","Titre 3","Title","Subtitle"}
 
-def _is_heading(p) -> bool:
-    s = p.style.name if p.style else ""
+def _strip_accents(x: str) -> str:
+    if x is None:
+        return ""
+    nfkd = unicodedata.normalize("NFKD", x)
+    return "".join(ch for ch in nfkd if not unicodedata.combining(ch))
+
+def _norm(s: str) -> str:
+    # lower + sans accents + apostrophe normalisée + espaces compactés
+    return " ".join(_strip_accents((s or "")).lower().replace("’", "'").split())
+
+def _is_heading_style(p) -> bool:
+    s = p.style.name if getattr(p, "style", None) else ""
     return (s in HEADING_STYLES) or s.startswith("Heading")
 
-def parse_docx_sections(path) -> Dict[str, str]:
+def _looks_like_heading(text: str, paragraph, expected_map: Dict[str, str]) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    # 1) Si c'est exactement un des titres attendus -> heading
+    if _norm(t) in expected_map:
+        return True
+    # 2) Sinon, si style "Heading" mais court et sans ponctuation de phrase -> heading
+    if _is_heading_style(paragraph):
+        if len(t) <= 80 and t.count(" ") <= 11 and all(p not in t for p in [".", "!", "?"]):
+            return True
+    return False
+
+def parse_docx_sections(path, expected_headings: List[str] = None) -> Dict[str, str]:
     """
-    Return {heading: text} merging paragraphs under each heading.
-    Also appends any tables found under the last seen heading as a simple Markdown table.
+    Retourne {heading: texte}. Détecte les titres par:
+      - appartenance à la liste 'expected_headings' (insensible casse/accents),
+      - OU style Heading court sans ponctuation.
+    Les tableaux sont ajoutés en Markdown sous le dernier titre vu.
     """
     doc = Document(path)
+    expected_map = {_norm(h): h for h in (expected_headings or [])}
+
     sections: Dict[str, str] = {}
     current = None
     buff: List[str] = []
@@ -23,33 +50,29 @@ def parse_docx_sections(path) -> Dict[str, str]:
         if current and buff:
             text = "\n\n".join([x for x in buff if x.strip()])
             if text.strip():
-                if current in sections and sections[current].strip():
-                    sections[current] = sections[current].strip() + "\n\n" + text.strip()
-                else:
-                    sections[current] = text.strip()
+                sections[current] = (sections.get(current, "") + ("\n\n" if sections.get(current) else "") + text).strip()
         buff = []
 
-    # paragraphs
     for p in doc.paragraphs:
         t = (p.text or "").strip()
-        if _is_heading(p) and t:
+        if not t:
+            continue
+        if _looks_like_heading(t, p, expected_map):
             flush()
-            current = t
+            # si c'est un titre "attendu", on met l'étiquette canonique (ex: "Introduction")
+            n = _norm(t)
+            current = expected_map.get(n, t)
         else:
-            if t:
-                buff.append(t)
+            buff.append(t)
     flush()
 
-    # tables -> append to the last heading
+    # Tables -> concat en Markdown sous le dernier heading (si présent)
     last_heading = None
     for p in doc.paragraphs:
-        if _is_heading(p) and p.text.strip():
-            last_heading = p.text.strip()
+        if _looks_like_heading((p.text or "").strip(), p, expected_map):
+            last_heading = expected_map.get(_norm(p.text.strip()), p.text.strip())
 
     if doc.tables:
-        if not last_heading:
-            last_heading = "TABLES"
-        # concatenate all tables as markdown under the last heading (or create if missing)
         md_chunks = []
         for table in doc.tables:
             rows = []
@@ -59,10 +82,7 @@ def parse_docx_sections(path) -> Dict[str, str]:
             if md.strip():
                 md_chunks.append(md)
         if md_chunks:
-            merged = "\n\n".join(md_chunks)
-            if last_heading in sections and sections[last_heading].strip():
-                sections[last_heading] = sections[last_heading].strip() + "\n\n" + merged
-            else:
-                sections[last_heading] = merged
+            target = last_heading or "TABLES"
+            sections[target] = (sections.get(target, "") + ("\n\n" if sections.get(target) else "") + "\n\n".join(md_chunks)).strip()
 
     return sections
