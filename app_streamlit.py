@@ -727,19 +727,16 @@ if uploaded is not None:
     st.markdown("""
         <style>
           .sect p { margin:.35rem 0; }
-          .sect ol, .sect ul { margin:.35rem 0 .55rem 1.25rem; padding-left:1.25rem; }
+          .sect ol, .sect ul { margin: .4rem 0 .6rem 1.25rem; padding-left: 1.25rem; }
           .sect li { margin:.15rem 0; }
-        
-          .sect li p.cont {
-            margin:.25rem 0;
-            padding-left:0;
-            text-indent:0;
-            margin-left:-1.25rem;
-          }
+          /* quand on ferme la liste puis on revient à un paragraphe normal */
+          .sect ol + p, .sect ul + p { margin-left: 0 !important; }
+          /* table et images */
           .sect table { width:100%; border-collapse:collapse; }
           .sect table td, .sect table th { border:1px solid #ccc; padding:6px; }
         </style>
         """, unsafe_allow_html=True)
+
 
     for fdef in fields:
         key = fdef["key"]; label = fdef["label"]
