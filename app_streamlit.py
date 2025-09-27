@@ -519,7 +519,7 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
                 at_depth = list_stack[target_depth - 1]
                 if kind == "ol":
                     different_num_id = (numId is not None and at_depth.get("numId") != numId)
-                    manual_restart   = (numId is None and manual_start1)
+                    manual_restart   = (numId is None and manual_start1 and at_depth.get("tag") == "ol")
                     if different_num_id or manual_restart:
                         # ferme toutes les listes à partir de ce niveau
                         while len(list_stack) >= target_depth:
