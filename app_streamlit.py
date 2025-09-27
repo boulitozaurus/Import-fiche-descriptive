@@ -403,17 +403,13 @@ def _iter_blocks(parent):
 
 def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, str]:
     """
-    Lit le .docx et renvoie {heading: HTML}, en respectant l'ordre du document.
-    - Détecte les titres via expected_headings et/ou styles Heading.
-    - Conserve le formatage (gras/italique/souligné/couleurs), <br/>, images (base64) et liens.
-    - Gère listes imbriquées (<ul>/<ol>) et continuité des <ol> même si des paragraphes/puces
-      s'intercalent ; redémarre proprement un <ol> après un titre ou un paragraphe se terminant par ':'.
-    - Convertit les tableaux en <table>.
-    Prérequis : _norm, _looks_like_heading, _iter_blocks, _para_list_info, _para_to_html.
+    - Ne met plus les paragraphes hors-liste *dans* le <li> courant (on ferme la liste),
+      ce qui évite les blocs décalés.
+    - Continue correctement les <ol> après un paragraphe hors-liste via <li value="N">.
+    - Redémarre une nouvelle numérotation après un titre ou une phrase d’intro finissant par ':'.
     """
     doc = Document(path)
 
-    # titres attendus (accepte aussi la variante finissant par ":")
     exp = {_norm(h): h for h in expected_headings}
     exp.update({_norm(h.rstrip(":")): h for h in expected_headings})
 
@@ -421,16 +417,14 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
     current: str | None = None
     buf: list[str] = []
 
-    # pile des listes ouvertes, avec méta numId par niveau
-    # ex: [{"tag":"ol","numId":"7"},{"tag":"ul","numId":None}, ...]
-    list_stack: list[dict] = []
-
-    # compteurs <ol> par niveau + valeur à appliquer au 1er <li> d'un <ol> rouvert
+    # pile des listes ouvertes, avec numId (quand Word fournit de la numérotation native)
+    list_stack: list[dict] = []   # ex: [{"tag":"ol","numId":"7"}, {"tag":"ul","numId":None}]
+    # compteurs <ol> par niveau (0 = top) + valeur à appliquer au 1er <li> d’un <ol> rouvert
     ol_counters: dict[int, int] = {}
     ol_next_value: dict[int, int] = {}
 
-    # indice contextuel : après un titre ou un paragraphe hors-liste terminant par ':',
-    # le prochain OL top-niveau doit REPARTIR à 1
+    # indice contextuel : après un titre ou un paragraphe hors-liste qui finit par ':',
+    # le prochain <ol> de niveau 0 doit redémarrer à 1.
     restart_ol_hint: bool = False
 
     def _cleanup_counters(depth: int) -> None:
@@ -442,16 +436,6 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
         for lvl in list(ol_next_value.keys()):
             if lvl >= depth:
                 del ol_next_value[lvl]
-
-    def _append_inside_last_li(html_fragment: str) -> bool:
-        """Insère html_fragment juste avant </li> du dernier <li> émis."""
-        for i in range(len(buf) - 1, -1, -1):
-            s = buf[i]
-            j = s.rfind("</li>")
-            if j != -1:
-                buf[i] = s[:j] + html_fragment + s[j:]
-                return True
-        return False
 
     def _numref(p: Paragraph) -> tuple[str | None, int | None]:
         """Retourne (numId, ilvl) si liste Word native, sinon (None, None)."""
@@ -469,7 +453,6 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
             return None, None
 
     def flush() -> None:
-        """Clôture la section courante (ferme listes + pousse le HTML dans sections)."""
         nonlocal buf, current, list_stack, ol_counters, ol_next_value, restart_ol_hint
         while list_stack:
             buf.append(f"</{list_stack.pop()['tag']}>")
@@ -480,62 +463,56 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
         buf = []
         ol_counters.clear()
         ol_next_value.clear()
-        restart_ol_hint = False  # on repart proprement pour la prochaine section
+        restart_ol_hint = False
 
     for block in _iter_blocks(doc):
 
-        # ---------------- Paragraphe ----------------
+        # ---------- PARAGRAPHES ----------
         if isinstance(block, Paragraph):
-            t = (block.text or "").strip()
+            text_clean = (block.text or "").strip()
 
-            # Titre : on clôture la section précédente puis on démarre la nouvelle
-            if t and _looks_like_heading(t, block, exp):
+            # Titre : nouvelle section
+            if text_clean and _looks_like_heading(text_clean, block, exp):
                 while list_stack:
                     buf.append(f"</{list_stack.pop()['tag']}>")
                 flush()
-                current = exp.get(_norm(t), exp.get(_norm(t.rstrip(":")), t))
-                restart_ol_hint = True  # après un titre, prochaine numérotation doit repartir
+                current = exp.get(_norm(text_clean), exp.get(_norm(text_clean.rstrip(":")), text_clean))
+                restart_ol_hint = True  # prochain <ol> top-niveau repart à 1
                 continue
 
-            # Métadonnées de liste
+            # Détection liste/type/niveau (ta fonction existante)
             kind, level = _para_list_info(block, block.text or "")
-            numId, _ilvl_from_numref = _numref(block)
+            numId, _ = _numref(block)
             manual_start1 = bool(re.match(r'^\s*1[.)]\s', block.text or ""))
 
-            # Heuristique #1 : si un UL arrive juste après un OL et que le niveau remonté vaut 0,
-            # on FORCE l'imbrication (nested) sous le <li> courant de l'OL (pour garder la continuité)
+            # Heuristique : si un UL arrive juste après un OL et que le niveau renvoyé vaut 0,
+            # on considère quand même que c'est un sous-niveau (UL imbriquée).
             if kind == "ul" and list_stack and list_stack[-1]["tag"] == "ol":
                 if level is None or (level or 0) == 0:
-                    level = len(list_stack)  # target_depth = len(list_stack)+1 (nested)
+                    level = len(list_stack)  # nested UL sous l’OL courant
 
             if kind is None:
-                # Paragraphe "normal"
-                html_p = _para_to_html(block)[1]  # <p>...</p>
-                if list_stack:
-                    # S'il y a une liste ouverte, on place le paragraphe DANS le dernier <li>
-                    if not _append_inside_last_li(html_p):
-                        buf.append(html_p)
-                else:
-                    buf.append(html_p)
-                    # Heuristique #2 : un paragraphe hors-liste qui se termine par ':'
-                    # signale souvent l'introduction d'une numérotation indépendante juste après.
-                    if t.endswith(":"):
-                        restart_ol_hint = True
+                # Paragraphe normal : on ferme d'abord toutes les listes ouvertes
+                while list_stack:
+                    buf.append(f"</{list_stack.pop()['tag']}>")
+                # puis on écrit le <p> "plein gauche"
+                buf.append(_para_to_html(block)[1])
+                # indice pour redémarrer un OL juste après une intro finissant par ':'
+                if text_clean.endswith(":"):
+                    restart_ol_hint = True
                 continue
 
             # profondeur cible (niveau 0 => 1 liste ouverte)
             target_depth = (level or 0) + 1
 
-            # Redémarrage forcé après titre/intro ':' pour un OL de niveau 0
+            # Redémarrage de numérotation ?
             section_restart = (kind == "ol" and restart_ol_hint and target_depth == 1)
 
-            # Si on a déjà une liste ouverte à cette profondeur, vérifie redémarrage :
-            #   - numId qui change (nouvelle liste Word)
-            #   - OU (on était déjà en OL et on rencontre '1.' saisi) => restart manuel
             if target_depth <= len(list_stack):
                 at_depth = list_stack[target_depth - 1]
                 if kind == "ol":
                     different_num_id = (numId is not None and at_depth.get("numId") != numId)
+                    # Ne considère "1." manuel comme restart QUE si on était déjà en <ol>
                     manual_restart   = (numId is None and manual_start1 and at_depth.get("tag") == "ol")
                     if section_restart or different_num_id or manual_restart:
                         while len(list_stack) >= target_depth:
@@ -543,26 +520,26 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
                         _cleanup_counters(target_depth - 1)
                         _cleanup_nextvals(target_depth - 1)
 
-            # Réduction de profondeur : ferme des listes
+            # Réduction de profondeur
             while len(list_stack) > target_depth:
                 buf.append(f"</{list_stack.pop()['tag']}>")
             _cleanup_counters(len(list_stack))
             _cleanup_nextvals(len(list_stack))
 
-            # Ouverture : ajoute des listes jusqu'à la profondeur cible
+            # Ouverture jusqu'à la profondeur cible
             while len(list_stack) < target_depth:
-                open_level = len(list_stack)  # 0,1,2...
+                open_level = len(list_stack)
                 to_open = kind if open_level + 1 == target_depth else "ul"
                 if to_open == "ol":
                     start = ol_counters.get(open_level, 0) + 1
-                    buf.append("<ol>")                 # pas d'attribut start (peu fiable)
-                    ol_next_value[open_level] = start  # appliqué au 1er <li>
+                    buf.append("<ol>")                  # pas d'attribut start (peu fiable sous Streamlit)
+                    ol_next_value[open_level] = start   # on appliquera <li value="start">
                     list_stack.append({"tag": "ol", "numId": numId})
                 else:
                     buf.append("<ul>")
                     list_stack.append({"tag": "ul", "numId": None})
 
-            # Ajuste le type au niveau courant si besoin (ul <-> ol)
+            # Correction de type au niveau courant si besoin
             if list_stack and list_stack[-1]["tag"] != kind:
                 buf.append(f"</{list_stack.pop()['tag']}>")
                 open_level = len(list_stack)
@@ -575,7 +552,7 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
                     buf.append("<ul>")
                     list_stack.append({"tag": "ul", "numId": None})
 
-            # Ajoute l'item (avec reprise via value="N" si besoin)
+            # Ajoute l’item
             _, li_html = _para_to_html(block)
             if kind == "ol":
                 lvl = level or 0
@@ -584,19 +561,19 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
                     li_html = f'<li value="{start_for_this_li}">' + li_html[4:]
             buf.append(li_html)
 
-            # Incrémente le compteur pour les <ol> et aligne numId au niveau
+            # MàJ compteur et numId
             if kind == "ol":
                 lvl = level or 0
                 ol_counters[lvl] = ol_counters.get(lvl, 0) + 1
                 if list_stack and list_stack[-1]["tag"] == "ol" and list_stack[-1].get("numId") is None and numId is not None:
                     list_stack[-1]["numId"] = numId
 
-            restart_ol_hint = False  # on a consommé l'indice
-            continue  # paragraphe traité
+            restart_ol_hint = False
+            continue
 
-        # ---------------- Tableau ----------------
+        # ---------- TABLEAUX ----------
         if isinstance(block, Table):
-            # on ferme les listes avant d'insérer un tableau (mais on garde les compteurs)
+            # on ferme les listes avant d'insérer un tableau (on garde les compteurs)
             while list_stack:
                 buf.append(f"</{list_stack.pop()['tag']}>")
 
@@ -607,7 +584,6 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
                     cell_parts: list[str] = []
                     for pp in cell.paragraphs:
                         k, frag = _para_to_html(pp)
-                        # si une puce isolée est trouvée dans une cellule, on la met dans <ul> pour éviter un <li> orphelin
                         cell_parts.append(f"<ul>{frag}</ul>" if k.startswith("li") else frag)
                     cells_html.append(f"<td>{''.join(cell_parts) or '&nbsp;'}</td>")
                 rows_html.append(f"<tr>{''.join(cells_html)}</tr>")
@@ -617,16 +593,13 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
                 + "".join(rows_html)
                 + "</table>"
             )
-            # après un tableau, si un OL top-niveau survient, il peut s'agir d'une nouvelle numérotation
+            # souvent après un tableau on repart sur une nouvelle numérotation
             restart_ol_hint = True
             continue
 
-        # autres types de blocs : ignorés
-
-    # Fin du document : on pousse la dernière section
+    # fin document
     flush()
     return sections
-
 
 # ---------------- Load schema + fixed heading map ----------------
 
@@ -740,16 +713,17 @@ if uploaded is not None:
     st.header("Aperçu des sections (mise en forme préservée)")
     st.markdown("""
         <style>
-          .sect p { margin: 0 0 10px 0; line-height: 1.55; }
-          .sect ul, .sect ol { margin: 6px 0 12px 1.4rem; }
-          .sect ul ul, .sect ol ol, .sect ul ol, .sect ol ul { margin-left: 1.2rem; }
-          .sect table { border-collapse: collapse; width: 100%; margin: 6px 0 12px 0; }
-          .sect td, .sect th { border: 1px solid #666; padding: 6px; vertical-align: top; }
-          .sect img { max-width: 100%; height: auto; display: inline-block; }
-          .sect a { text-decoration: underline; }
-          .sect .img-unsupported { display:inline-block; padding:2px 6px; border:1px dashed #888; border-radius:6px; font-size:.9em; opacity:.9; }
+          .sect p { margin:.35rem 0; }
+          .sect ol, .sect ul { margin: .4rem 0 .6rem 1.25rem; padding-left: 1.25rem; }
+          .sect li { margin:.15rem 0; }
+          /* quand on ferme la liste puis on revient à un paragraphe normal */
+          .sect ol + p, .sect ul + p { margin-left: 0 !important; }
+          /* table et images */
+          .sect table { width:100%; border-collapse:collapse; }
+          .sect table td, .sect table th { border:1px solid #ccc; padding:6px; }
         </style>
         """, unsafe_allow_html=True)
+
 
     for fdef in fields:
         key = fdef["key"]; label = fdef["label"]
