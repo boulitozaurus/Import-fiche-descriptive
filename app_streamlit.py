@@ -238,16 +238,17 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
     sections: dict[str, str] = {}
     current = None
     buf = []
-    in_list = False
-    list_kind = None  # 'ul'/'ol'
+    list_stack: list[str] = []   # <<< AJOUT ICI (pile pour gérer les <ul>/<ol> imbriqués)
 
     def flush():
-        nonlocal buf, in_list, list_kind, current
-        if in_list:
-            buf.append(f"</{list_kind}>"); in_list=False; list_kind=None
+        nonlocal buf, current, list_stack
+        # ferme toutes les listes ouvertes avant de clôturer la section
+        while list_stack:
+            buf.append(f"</{list_stack.pop()}>")
         if current and buf:
             html = "".join(buf).strip()
-            if html: sections[current] = (sections.get(current,"") + html)
+            if html:
+                sections[current] = (sections.get(current, "") + html)
         buf = []
 
     for block in _iter_blocks(doc):
