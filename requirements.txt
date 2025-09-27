@@ -2,4 +2,3 @@ streamlit
 python-docx
 PyYAML
 requests
-unicodedata
