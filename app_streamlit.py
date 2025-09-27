@@ -159,63 +159,11 @@ def load_heading_map() -> Dict[str, str]:
             return m
     return DEFAULT_HEADING_MAP
 
-# ---------------- Free translation engines (no API key) ----------------
-
-def split_html_blocks(text: str) -> List[str]:
-    # coupe grossièrement sur balises de paragraphe / liste pour limiter la longueur des requêtes
-    import re
-    chunks = re.split(r"(?i)(</p>|</li>)", text)
-    # recolle les séparateurs pour ne pas perdre les balises fermantes
-    out, buf = [], ""
-    for i in range(0, len(chunks), 2):
-        seg = chunks[i]
-        end = chunks[i+1] if i+1 < len(chunks) else ""
-        block = (seg + end).strip()
-        if block:
-            out.append(block)
-    return out or [text]
-
-def translate_fr_to_nl_mymemory_html(html: str) -> str:
-    if not html.strip():
-        return ""
-    out = []
-    for b in split_html_blocks(html):
-        try:
-            r = requests.get(
-                "https://api.mymemory.translated.net/get",
-                params={"q": b, "langpair": "fr|nl"},
-                timeout=30
-            )
-            r.raise_for_status()
-            out.append(r.json()["responseData"]["translatedText"])
-        except Exception as e:
-            out.append(f"[TRAD ERREUR: {e}]")
-    return "".join(out)
-
-def translate_fr_to_nl_libretranslate_html(html: str, endpoint: str) -> str:
-    if not html.strip():
-        return ""
-    out = []
-    for b in split_html_blocks(html):
-        r = requests.post(endpoint, json={"q": b, "source": "fr", "target": "nl", "format": "html"}, timeout=60)
-        r.raise_for_status()
-        out.append(r.json()["translatedText"])
-    return "".join(out)
-
 # ---------------- UI ----------------
 
-st.set_page_config(page_title="Auto-Mapping Word → CRM (FR+NL)", layout="wide")
-st.title("Auto-Mapping Word → CRM (FR + NL)")
-st.caption("Déposez votre fiche .docx : mapping fixe Word→PDF/CRM, traduction NL sans clé API (MyMemory par défaut).")
-
-# Sidebar: translation engine choice
-st.sidebar.header("Traduction")
-provider = st.sidebar.selectbox(
-    "Moteur",
-    ["MyMemory (gratuit, public)", "LibreTranslate (endpoint HTTP)"],
-    index=0,
-)
-lt_endpoint = st.sidebar.text_input("LibreTranslate endpoint", "http://localhost:5000/translate")
+st.set_page_config(page_title="Auto-Mapping Word", layout="wide")
+st.title("Auto-Mapping Word")
+st.caption("Déposez votre fiche .docx : mapping fixe Word→PDF/CRM")
 
 # Load schema + map
 schema = load_schema()
@@ -234,75 +182,38 @@ if uploaded is not None:
     with open(tmp_path, "wb") as f:
         f.write(uploaded.read())
 
+    # Parse (HTML par section)
     sections = parse_docx_sections(tmp_path, expected_headings=expected_word_headings)
     sections_norm = {norm(k): v for k, v in sections.items()}
-
-    # Auto-map FR payload
+    
+    # Auto-map (FR HTML)
     rows = []
-    fr_payload: Dict[str, str] = {}
+    fr_payload = {}
     for word_h, pdf_h in word_to_pdf.items():
         w_norm = norm(word_h)
         target_key = key_by_pdf_label_norm.get(norm(pdf_h))
-        found = w_norm in sections_norm
-        fr_text = sections_norm.get(w_norm, "")
+        found = w_norm in sections_norm or norm(word_h.rstrip(":")) in sections_norm
+        fr_html = sections_norm.get(w_norm) or sections_norm.get(norm(word_h.rstrip(":")), "")
         if target_key:
-            fr_payload[target_key] = fr_text
-
+            fr_payload[target_key] = fr_html
         rows.append({
             "Word heading attendu": word_h,
             "Dans le .docx ?": "✅ Oui" if found else "❌ Non",
             "PDF/CRM heading": pdf_h,
             "CRM key": target_key or "(non défini)",
-            "FR (aperçu)": (fr_text[:160] + "…") if fr_text and len(fr_text) > 160 else fr_text
         })
-
+    
     st.subheader("Résultat du mapping automatique")
-    st.dataframe(rows, use_container_width=True)
-
-    # Optional FR edits
-    st.subheader("Ajustements éventuels (FR)")
-
-    edited_fr = {}
+    st.dataframe(rows)  # affichage simple
+    
+    # ====== Affichage VERTICAL des sections (HTML) ======
+    st.header("Aperçu des sections (mise en forme préservée)")
     for fdef in fields:
         key = fdef["key"]
         label = fdef["label"]
-        val_html = fr_payload.get(key, "")
-    
-        with st.expander(f"{label} ({key}) — FR", expanded=True):
-            # Aperçu fidèle (HTML)
-            st.markdown(val_html if val_html else "_(vide)_", unsafe_allow_html=True)
-            st.caption("Source HTML (éditable) — ce sera le texte envoyé à l'IT et à la traduction")
-            edited_fr[key] = st.text_area(f"HTML {label}", value=val_html, height=220, key=f"html_{key}")
-
-    # Translate + export
-    st.header("2) Traduire et Exporter")
-    if st.button("Générer traduction NL"):
-        results = []
-        for fdef in fields:
-            key = fdef["key"]
-            nl_key = nl_key_by_key.get(key)
-            html_fr = edited_fr.get(key, "")
-        
-            if provider.startswith("MyMemory"):
-                html_nl = translate_fr_to_nl_mymemory_html(html_fr) if html_fr.strip() else ""
+        html = fr_payload.get(key, "")
+        with st.expander(f"{label} ({key})", expanded=True):
+            if html:
+                st.markdown(html, unsafe_allow_html=True)
             else:
-                html_nl = translate_fr_to_nl_libretranslate_html(html_fr, lt_endpoint) if html_fr.strip() else ""
-        
-            results.append({"key": key, "fr": html_fr, "nl_key": nl_key, "nl": html_nl})
-        st.session_state["results_auto"] = results
-
-    results = st.session_state.get("results_auto")
-    if results:
-        st.subheader("Aperçu / Export")
-        st.dataframe(results, use_container_width=True)
-        payload = {"fields": results}
-        st.download_button("Télécharger payload.json", data=json.dumps(payload, ensure_ascii=False, indent=2), file_name="payload.json")
-
-        out_csv = io.StringIO()
-        w = csv.writer(out_csv)
-        w.writerow(["key","fr","nl_key","nl"])
-        for r in results:
-            w.writerow([r["key"], r["fr"], r["nl_key"], r["nl"]])
-        st.download_button("Télécharger payload.csv", data=out_csv.getvalue(), file_name="payload.csv", mime="text/csv")
-
-st.info("Aucun OpenAI/ChatGPT requis. MyMemory est public/gratuit (quotas). LibreTranslate fonctionne si vous avez un endpoint HTTP (Docker).")
+                st.caption("Aucun contenu détecté pour cette section.")
