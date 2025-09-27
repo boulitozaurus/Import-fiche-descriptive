@@ -11,7 +11,6 @@ from streamlit.components.v1 import html as st_html
 
 
 # ---------------- Utils: headings + parsing ----------------
-# === Parser DOCX -> sections HTML fidèles (listes/tableaux/images/formatage) ===
 from docx import Document
 from docx.table import _Cell, Table
 from docx.text.paragraph import Paragraph
@@ -402,20 +401,31 @@ def _iter_blocks(parent):
         elif isinstance(child, CT_Tbl):
             yield Table(child, parent)
 
-
 def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, str]:
+    """
+    Lit le .docx et renvoie {heading: HTML}, en respectant l'ordre du document.
+    - Détecte les titres via expected_headings et/ou styles Heading.
+    - Conserve le formatage (gras/italique/souligné/couleurs), <br/>, images (base64) et liens.
+    - Gère listes imbriquées (<ul>/<ol>) + continuité des <ol> (start=...).
+    - Convertit les tableaux en <table>.
+    Prérequis : _norm, _looks_like_heading, _iter_blocks, _para_list_info, _para_to_html.
+    """
     doc = Document(path)
+
+    # normalise les titres attendus (on accepte aussi la variante finissant par ":")
     exp = {_norm(h): h for h in expected_headings}
     exp.update({_norm(h.rstrip(":")): h for h in expected_headings})
 
     sections: dict[str, str] = {}
-    current = None
-    buf = []
-    list_stack: list[str] = []   # <<< AJOUT ICI (pile pour gérer les <ul>/<ol> imbriqués)
+    current: str | None = None
+    buf: list[str] = []
+    list_stack: list[str] = []          # pile des balises ouvertes: ["ul", "ol", ...]
+    ol_counters: dict[int, int] = {}    # compteur par niveau pour les listes ordonnées
 
     def flush():
-        nonlocal buf, current, list_stack
-        # ferme toutes les listes ouvertes avant de clôturer la section
+        """Clôture la section courante (ferme listes + pousse le HTML dans sections)."""
+        nonlocal buf, current, list_stack, ol_counters
+        # ferme toutes les listes ouvertes
         while list_stack:
             buf.append(f"</{list_stack.pop()}>")
         if current and buf:
@@ -423,72 +433,111 @@ def parse_docx_sections_html(path, expected_headings: list[str]) -> dict[str, st
             if html:
                 sections[current] = (sections.get(current, "") + html)
         buf = []
+        # nouvelle section => on remet les compteurs à zéro
+        ol_counters.clear()
+
+    def _cleanup_counters(depth: int):
+        """Supprime les compteurs des niveaux >= depth (quand on remonte d'un niveau)."""
+        for lvl in list(ol_counters.keys()):
+            if lvl >= depth:
+                del ol_counters[lvl]
 
     for block in _iter_blocks(doc):
-            if isinstance(block, Paragraph):
-                t = (block.text or "").strip()
-                if t and _looks_like_heading(t, block, exp):
-                    # On ferme toutes les listes ouvertes avant de changer de section
-                    while list_stack:
-                        buf.append(f"</{list_stack.pop()}>")
-                    flush()
-                    current = exp.get(_norm(t), exp.get(_norm(t.rstrip(":")), t))
-                    continue
-        
-                # --- gestion des listes NIVEAU / TYPE ---
-                kind, level = _para_list_info(block, block.text or "")
-                if kind is None:
-                    # on ferme toutes les listes si on n'est plus dans une liste
-                    while list_stack:
-                        buf.append(f"</{list_stack.pop()}>")
-                    # paragraphe simple
-                    buf.append(_para_to_html(block)[1])
-                    continue
-        
-                # On veut une profondeur cible = level+1 (car niveau 0 => 1 liste ouverte)
-                target_depth = (level or 0) + 1
-        
-                # Ferme si on est trop profond
-                while len(list_stack) > target_depth:
-                    buf.append(f"</{list_stack.pop()}>")
-        
-                # Ouvre si pas assez profond
-                while len(list_stack) < target_depth:
-                    # si on ouvre le dernier niveau demandé, on respecte le type détecté (ul/ol)
-                    to_open = kind if len(list_stack) + 1 == target_depth else "ul"
-                    buf.append(f"<{to_open}>")
-                    list_stack.append(to_open)
-        
-                # Ajuste le type au niveau courant si besoin (ul -> ol, etc.)
-                if list_stack and list_stack[-1] != kind:
-                    buf.append(f"</{list_stack.pop()}>")
-                    buf.append(f"<{kind}>")
-                    list_stack.append(kind)
-        
-                # Ajoute l'item
-                _, li_html = _para_to_html(block)
-                buf.append(li_html)
-        
-            else:
-                # ---------- TABLE ----------
-                # On ferme les listes ouvertes avant d'insérer un tableau
+        # ---------------- Paragraphe ----------------
+        if isinstance(block, Paragraph):
+            t = (block.text or "").strip()
+
+            # Titre : on clôture la section précédente puis on démarre la nouvelle
+            if t and _looks_like_heading(t, block, exp):
+                # ferme toutes les listes avant de changer de section
                 while list_stack:
                     buf.append(f"</{list_stack.pop()}>")
-        
-                rows = []
-                for row in block.rows:
-                    tds = []
-                    for cell in row.cells:
-                        parts = []
-                        for pp in cell.paragraphs:
-                            k, frag = _para_to_html(pp)
-                            parts.append(f"<ul>{frag}</ul>" if k.startswith("li") else frag)
-                        tds.append(f"<td>{''.join(parts) or '&nbsp;'}</td>")
-                    rows.append(f"<tr>{''.join(tds)}</tr>")
-                buf.append(
-                    "<table border='1' cellspacing='0' cellpadding='6' style='border-collapse:collapse;width:100%'>"
-                    + "".join(rows) + "</table>"
-                )
+                flush()
+                current = exp.get(_norm(t), exp.get(_norm(t.rstrip(":")), t))
+                continue
+
+            # Liste ? (type + niveau)
+            kind, level = _para_list_info(block, block.text or "")
+            if kind is None:
+                # paragraphe simple : on ferme les listes mais on NE réinitialise PAS ol_counters
+                while list_stack:
+                    buf.append(f"</{list_stack.pop()}>")
+                # on pousse le contenu du paragraphe
+                buf.append(_para_to_html(block)[1])
+                continue
+
+            # profondeur cible (niveau 0 => 1 liste ouverte)
+            target_depth = (level or 0) + 1
+
+            # Réduction de profondeur : ferme des listes
+            while len(list_stack) > target_depth:
+                buf.append(f"</{list_stack.pop()}>")
+            _cleanup_counters(len(list_stack))
+
+            # Ouverture : ajoute des listes jusqu'à la profondeur cible
+            while len(list_stack) < target_depth:
+                open_level = len(list_stack)  # 0, 1, 2, ...
+                to_open = kind if open_level + 1 == target_depth else "ul"
+                if to_open == "ol":
+                    start = ol_counters.get(open_level, 0) + 1
+                    start_attr = f' start="{start}"' if start > 1 else ""
+                    buf.append(f"<ol{start_attr}>")
+                else:
+                    buf.append("<ul>")
+                list_stack.append(to_open)
+
+            # Ajuste le type de la liste au niveau courant si besoin (ul <-> ol)
+            if list_stack and list_stack[-1] != kind:
+                buf.append(f"</{list_stack.pop()}>")
+                open_level = len(list_stack)
+                if kind == "ol":
+                    start = ol_counters.get(open_level, 0) + 1
+                    start_attr = f' start="{start}"' if start > 1 else ""
+                    buf.append(f"<ol{start_attr}>")
+                else:
+                    buf.append("<ul>")
+                list_stack.append(kind)
+
+            # Ajoute l'item
+            _, li_html = _para_to_html(block)
+            buf.append(li_html)
+
+            # Incrémente le compteur pour les <ol>
+            if kind == "ol":
+                lvl = level or 0
+                ol_counters[lvl] = ol_counters.get(lvl, 0) + 1
+
+            continue  # paragraphe traité
+
+        # ---------------- Tableau ----------------
+        if isinstance(block, Table):
+            # on ferme les listes avant d'insérer un tableau (mais on garde les compteurs)
+            while list_stack:
+                buf.append(f"</{list_stack.pop()}>")
+
+            rows_html: list[str] = []
+            for row in block.rows:
+                cells_html: list[str] = []
+                for cell in row.cells:
+                    cell_parts: list[str] = []
+                    for pp in cell.paragraphs:
+                        k, frag = _para_to_html(pp)
+                        # si une puce isolée est trouvée dans une cellule, on la met dans <ul> pour éviter un <li> orphelin
+                        cell_parts.append(f"<ul>{frag}</ul>" if k.startswith("li") else frag)
+                    cells_html.append(f"<td>{''.join(cell_parts) or '&nbsp;'}</td>")
+                rows_html.append(f"<tr>{''.join(cells_html)}</tr>")
+
+            buf.append(
+                "<table border='1' cellspacing='0' cellpadding='6' style='border-collapse:collapse;width:100%'>"
+                + "".join(rows_html)
+                + "</table>"
+            )
+            # on continue (les compteurs <ol> restent en mémoire pour reprendre plus loin)
+            continue
+
+        # autres types de blocs : ignorés
+
+    # Fin du document : on pousse la dernière section
     flush()
     return sections
 
