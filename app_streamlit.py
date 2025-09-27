@@ -123,27 +123,44 @@ def _run_to_html(run) -> str:
     return "".join(frags)
 
 def _hyperlink_map(p: Paragraph) -> dict:
-    """Mappe chaque run XML à son URL si le run est à l'intérieur d'un <w:hyperlink>."""
+    """Associe chaque run XML à son URL (<w:hyperlink> et <w:fldSimple instr='HYPERLINK ...'>)."""
     m = {}
     try:
-        for hl in p._p.iterchildren():
-            if hl.tag.endswith("}hyperlink"):
-                r_id = hl.get(qn("r:id"))
+        for el in p._p.iterchildren():
+            tag = el.tag
+            # Cas 1 : <w:hyperlink r:id="...">...</w:hyperlink>
+            if tag.endswith("}hyperlink"):
+                r_id = el.get(qn("r:id"))
                 url = None
                 if r_id:
                     rel = p.part.rels.get(r_id)
                     if rel is not None:
-                        # python-docx: .target_ref pour les liens externes
                         url = getattr(rel, "target_ref", None) or getattr(rel, "target_part", None)
-                        if hasattr(url, "partname"):  # cible interne
+                        if hasattr(url, "partname"):
                             url = str(url.partname)
-                # marque les <w:r> enfants de ce hyperlink
-                for r in hl.iterchildren():
+                for r in el.iterchildren():
                     if r.tag.endswith("}r"):
                         m[r] = url
+            # Cas 2 : <w:fldSimple w:instr="HYPERLINK \"https://...\"">...</w:fldSimple>
+            elif tag.endswith("}fldSimple"):
+                instr = el.get(qn("w:instr")) or ""
+                m_url = re.search(r'HYPERLINK\s+"([^"]+)"', instr, flags=re.I) or re.search(r'HYPERLINK\s+(\S+)', instr, flags=re.I)
+                if m_url:
+                    url = m_url.group(1)
+                    for r in el.iterchildren():
+                        if r.tag.endswith("}r"):
+                            m[r] = url
     except Exception:
         pass
     return m
+
+def _autolink_html(s: str) -> str:
+    # transforme http(s)://... en lien si aucune balise <a ...> n'est déjà présente
+    if "<a " in s: 
+        return s
+    return re.sub(r'(?<!["\'>])(https?://[^\s<]+)', 
+                  r'<a href="\1" target="_blank" rel="noopener noreferrer">\1</a>', 
+                  s)
 
 def _para_inner_html(p: Paragraph) -> str:
     """Construit l'HTML d'un paragraphe en conservant <a href>:
@@ -256,6 +273,7 @@ def _para_list_info(p: Paragraph, text: str) -> tuple[str | None, int | None]:
 def _para_to_html(p: Paragraph) -> tuple[str, str]:
     """("p"|"li-ul"|"li-ol", html) — conserve <br>, <img>, styles, liens."""
     inner = _para_inner_html(p) or _html_escape(p.text or "")
+        inner = _autolink_html(inner)
     kind, _ = _para_list_info(p, p.text or "")
     if kind == "ol":
         return ("li-ol", f"<li>{inner}</li>")
