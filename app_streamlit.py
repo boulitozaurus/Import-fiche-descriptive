@@ -194,41 +194,32 @@ def _autolink_html(s: str) -> str:
                   s)
 
 def _image_handler(image) -> dict:
-    """
-    Callback pour mammoth.images.inline(...)
-    - Ouvre les octets via image.open()
-    - Inline en base64 pour PNG/JPEG/...
-    - Range EMF/WMF (non supportés par les navigateurs) pour download
-    """
-    # 1) Récupère le content-type déclaré par Mammoth
     ctype = (getattr(image, "content_type", None) or "application/octet-stream").lower()
-
-    # 2) Lis les octets via image.open()
     try:
-        with image.open() as f:           # <-- la bonne API Mammoth
+        with image.open() as f:
             data = f.read()
     except Exception:
-        # Fallback parano si jamais open() échoue
         data = b""
 
-    # 3) EMF/WMF -> pas affichable en <img>: propose un download
     if ctype in ("image/x-emf", "image/emf", "image/x-wmf", "image/wmf", "application/octet-stream"):
-        import uuid, base64, streamlit as st
-        fname = f"{uuid.uuid4().hex}.{('emf' if 'emf' in ctype else 'wmf') if ('emf' in ctype or 'wmf' in ctype) else 'bin'}"
-        if "unsupported_images" not in st.session_state:
-            st.session_state["unsupported_images"] = []
-        st.session_state["unsupported_images"].append((fname, data, ctype))
-        # pixel transparent + alt explicite
+        import uuid, base64
+        uid = uuid.uuid4().hex
+        fname = f"{uid}.{'emf' if 'emf' in ctype else ('wmf' if 'wmf' in ctype else 'bin')}"
+        if "img_store" not in st.session_state:
+            st.session_state["img_store"] = {}
+        st.session_state["img_store"][uid] = (fname, data, ctype)
+
+        # pixel transparent + marqueurs
         return {
             "src": "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
-            "alt": "Image non affichable (EMF/WMF). Téléchargement disponible plus bas."
+            "alt": "Image non affichable (EMF/WMF).",
+            "data-unsupported": "1",
+            "data-uid": uid,
         }
 
-    # 4) Formats web affichables -> inline en base64
     import base64
     b64 = base64.b64encode(data).decode("ascii")
     return {"src": f"data:{ctype};base64,{b64}"}
-
 
 def docx_to_html(path: str) -> str:
     """Convertit le .docx en HTML avec Mammoth en utilisant notre handler d’images."""
@@ -238,6 +229,23 @@ def docx_to_html(path: str) -> str:
             convert_image=mammoth.images.inline(_image_handler)  # <-- garde bien inline()
         )
     return result.value
+
+def prepare_section_html(html: str):
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
+    downloads = []
+
+    for img in list(soup.find_all("img")):
+        if img.get("data-unsupported") == "1":
+            uid = img.get("data-uid")
+            if uid and "img_store" in st.session_state and uid in st.session_state["img_store"]:
+                fname, data, ctype = st.session_state["img_store"][uid]
+                downloads.append((uid, fname, data, ctype))
+            img.decompose()  # enlève le pixel transparent
+
+    # On répare au passage les 'src="data:..."' orphelins
+    cleaned = _fix_stray_data_uri(soup.div.decode_contents())
+    return cleaned, downloads
 
 # ---------------- Load schema + fixed heading map ----------------
 
@@ -304,6 +312,12 @@ def inject_css():
     </style>
     """, unsafe_allow_html=True)
 
+def _fix_stray_data_uri(html: str) -> str:
+    # transforme une ligne de type:  src="data:image/png;base64,...."
+    # en véritable balise <img src="data:..."/>
+    return re.sub(r'(?<!<img )src="data:image/[^"]+"', 
+                  lambda m: f'<img {m.group(0)} />', html)
+
 # ---------------- UI ----------------
 
 st.set_page_config(page_title="Auto-Mapping Word", layout="wide")
@@ -346,17 +360,17 @@ if uploaded is not None:
     # 2) Auto-mapping Word -> PDF/CRM (valeurs = HTML)
     fr_payload = {}
     rows = []
-    for word_h, pdf_h in word_to_pdf.items():
-        w_norm = _norm(word_h); w_norm2 = _norm(word_h.rstrip(":"))
-        target_key = key_by_pdf_label_norm.get(_norm(pdf_h))
-        found = (w_norm in sections_norm) or (w_norm2 in sections_norm)
-        fr_html = sections_norm.get(w_norm) or sections_norm.get(w_norm2, "")
-        if target_key: fr_payload[target_key] = fr_html
+    
+    for w_heading in expected_word_headings:
+        crm_label, crm_key = crm_map[w_heading]
+        content_html = sections.get(w_heading, "")  # <-- prend la section brute
+        fr_payload[crm_key] = content_html          # <-- pas via sections_norm
+    
         rows.append({
-            "Word heading attendu": word_h,
-            "Dans le .docx ?": "✅ Oui" if found else "❌ Non",
-            "PDF/CRM heading": pdf_h,
-            "CRM key": target_key or "(non défini)"
+            "Word heading attendu": w_heading,
+            "Dans le .docx ?": "✅ Oui" if content_html.strip() else "❌ Non",
+            "PDF/CRM heading": crm_label,
+            "CRM key": crm_key,
         })
 
     st.subheader("Résultat du mapping automatique")
@@ -366,15 +380,25 @@ if uploaded is not None:
 
     st.header("Aperçu des sections (mise en forme préservée)")
     inject_css()
+    
     for fdef in fields:
-        key = fdef["key"]; label = fdef["label"]
-        html_content = fr_payload.get(key, "")
+        key   = fdef["key"]
+        label = fdef["label"]
+    
+        raw_html = fr_payload.get(key, "")
+        clean_html, dls = prepare_section_html(raw_html)
+    
         st.subheader(label)
-        st.markdown(f"<div class='sect'>{html_content or '<p><em>(vide)</em></p>'}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='sect'>{clean_html or '<p><em>(vide)</em></p>'}</div>", unsafe_allow_html=True)
+    
+        # Boutons de téléchargement, localisés à la section
+        for uid, fname, data, ctype in dls:
+            st.download_button(f"Télécharger {fname}", data=data, file_name=fname, mime=ctype, key=f"dl_{uid}")
+    
         st.divider()
 
-    if st.session_state["unsupported_images"]:
-        st.info("Certaines images (EMF/WMF) ne peuvent pas s’afficher dans le navigateur. Télécharge-les :")
-        for i, (fname, data, ctype) in enumerate(st.session_state["unsupported_images"], 1):
-            st.download_button(f"Télécharger {fname}", data=data, file_name=fname, mime=ctype, key=f"dl_{i}")
+    
+    clean_html = _fix_stray_data_uri(fr_payload.get(key, ""))
+    st.markdown(f"<div class='sect'>{clean_html or '<p><em>(vide)</em></p>'}</div>", unsafe_allow_html=True)
+
 
