@@ -139,7 +139,7 @@ def _is_bullet_only_text(text: str) -> bool:
     return bool(BULLET_ONLY_RE.match(t))
 
 def _is_section_heading_p(p: Tag) -> bool:
-    # Hx = toujours des titres
+    # h1–h3 => toujours un titre
     if getattr(p, "name", None) in {"h1","h2","h3"}:
         return True
     if getattr(p, "name", None) != "p":
@@ -151,25 +151,24 @@ def _is_section_heading_p(p: Tag) -> bool:
 
     norm_txt = _norm(_strip_leading_numbering(txt)).rstrip(" :")
 
-    # Titres attendus (début de ligne uniquement)
-    KNOWN_STARTS = [
-        "introduction", "description",
+    KNOWN_EQUALS = {
+        "introduction","description",
         "contexte et usage des fonds",
         "facteurs de risque",
         "les bonnes raisons d investir",
-        "projet", "presentation de l operation",
+        "presentation de l operation",
         "localisation",
-        "administratif et timing", "planning",
+        "administratif et timing","planning",
         "marche et references",
-        "budget de l operation", "budget",
+        "budget de l operation","budget",
         "l operateur",
-        "track record et operations en cours", "track record",
+        "track record et operations en cours","track record",
         "structure et management",
-        "actionnariat et structure de l operation", "actionnariat",
-        "finances", "finance"
-    ]
-    has_bold = bool(p.find(["strong","b"]))
-    return any(norm_txt.startswith(h) for h in KNOWN_STARTS) and (has_bold or True)
+        "actionnariat et structure de l operation","actionnariat",
+        "finances","finance"
+    }
+    # p tout en gras ? on n'exige pas forcément, mais on reste sur égalité stricte
+    return norm_txt in KNOWN_EQUALS
 
 def _html_escape(s: str) -> str:
     return (s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
@@ -220,253 +219,78 @@ p[style-name='Titre 3']   => h3:fresh
 # ================= DÉCOUPAGE PAR SECTIONS =================
 
 def build_heading_index(expected_headings: list[str], word_to_pdf: dict[str, str]) -> dict[str, str]:
+    """
+    Index = clef normalisée -> Titre Word (pas CRM).
+    Ajoute des alias très limités (Description→Introduction, Contexte &/et, Finances/Finance).
+    """
     idx: dict[str, str] = {}
     for wh in expected_headings:
+        # variantes directes : forme telle quelle, version mappée (si tu en as), version sans numérotation
         for alias in {wh, word_to_pdf.get(wh, ''), _strip_leading_numbering(wh)}:
             if alias:
-                idx[_norm(alias)] = wh
-    
+                idx[_norm(alias.rstrip(" :"))] = wh
+
+    # alias minimaux, sûrs
     idx[_norm("description")] = "Introduction"
     idx[_norm("contexte & usage des fonds")] = "Contexte et usage des fonds"
+    idx[_norm("finance")] = "Finances"
+    idx[_norm("finances")] = "Finances"
     return idx
 
 def split_sections_by_headings(html: str, heading_index: dict[str, str]) -> dict[str, str]:
     """
-    Découpe robuste et conservatrice :
-      - lookup strict (égalité) sur titres normalisés
-      - secours (keywords/fuzzy) uniquement si l'élément ressemble VRAIMENT à un titre
-      - coupe l'accumulation dès qu'un quasi-titre non mappé apparaît (évite les débordements)
+    Découpage conservateur et déterministe (style v22) :
+    - on n'utilise que les titres connus (égalité stricte sur texte normalisé)
+    - on range tout préambule avant 1er titre dans 'Introduction'
+    - si 'Présentation de l'opération' est présent, on ignore 'Projet' comme titre top-niveau
     """
-    def nrm_title(s: str) -> str:
-        s = _strip_leading_numbering((s or "")).rstrip(" :")
-        return _norm(s)
+    def nrm(s: str) -> str:
+        return _norm(_strip_leading_numbering((s or "")).rstrip(" :"))
 
     soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
     out = {v: "" for v in set(heading_index.values())}
-    allowed_keys = set(out.keys())
+
+    # Pré-scan : repérer les titres visibles
+    present_titles = set()
+    for el in soup.find_all(["h1","h2","h3","p"]):
+        t = nrm(el.get_text(" ", strip=True))
+        if t in heading_index:
+            present_titles.add(heading_index[t])
+
+    ignore_projet = "Présentation de l'opération" in present_titles
 
     current = None
-    unmapped = []
-    known_norms = list(heading_index.keys())
-
-    # Keywords strictement ANCRÉS en début de ligne
-    STARTKEY_TO_WH = {
-        "points d attention": "Facteurs de risque",
-        "facteurs de risque": "Facteurs de risque",
-        "les bonnes raisons d investir": "Les bonnes raisons d'investir",
-        "presentation de l operation": "Projet",  # titre Word "Projet" pour PDF "Présentation de l'opération"
-        "projet": "Projet",
-        "localisation": "Localisation",
-        "administratif et timing": "Administratif et timing",
-        "marche et references": "Marché et références",
-        "budget de l operation": "Budget de l'opération",
-        "l operateur": "L'opérateur",
-        "track record et operations en cours": "Track record et opérations en cours",
-        "structure et management": "Structure et Management",
-        "actionnariat et structure de l operation": "Actionnariat et structure de l'opération",
-        "finances": "Finances",
-        "contexte et usage des fonds": "Contexte et usage des fonds",
-        "introduction": "Introduction",
-    }
-
-    def best_match(n: str, el: Tag) -> str | None:
-        # 0) On ne tente rien si ce n'est PAS un vrai titre
-        if not _is_section_heading_p(el):
-            return None
-        # 1) direct
-        if n in heading_index:
-            wh = heading_index[n]
-            return wh if wh in allowed_keys else None
-        # 2) variantes simples (retirer - et ')
-        n2 = re.sub(r"[-']", " ", n)
-        if n2 in heading_index:
-            wh = heading_index[n2]
-            return wh if wh in allowed_keys else None
-        # 3) start-keywords (ANCRÉS)
-        for kw, wh in STARTKEY_TO_WH.items():
-            if n.startswith(kw) and wh in allowed_keys:
-                return wh
-        # 4) fuzzy (plus strict)
-        close = difflib.get_close_matches(n, known_norms, n=1, cutoff=0.92)
-        if close:
-            wh = heading_index[close[0]]
-            return wh if wh in allowed_keys else None
-        return None
-
     for el in soup.div.children:
         if not hasattr(el, "get_text"):
             continue
 
         name = getattr(el, "name", None)
-        text = el.get_text(" ", strip=True) if name in {"h1", "h2", "h3", "h4", "h5", "h6", "p"} else ""
+        text = el.get_text(" ", strip=True) if name in {"h1","h2","h3","p"} else ""
         key = None
 
         if text:
-            norm_text = nrm_title(text)
-            key = heading_index.get(norm_text)
-            if not key:
-                key = best_match(norm_text, el)
+            norm_text = nrm(text)
+            if norm_text in heading_index:
+                wh = heading_index[norm_text]   # Titre Word
+                # ignorer 'Projet' si 'Présentation...' est présent
+                if ignore_projet and wh == "Projet":
+                    wh = None
+                key = wh
 
         if key:
             current = key
             continue
 
-        # Probable titre non mappé -> on coupe
-        if name in {"h1","h2","h3","h4","h5","h6","p"} and _is_section_heading_p(el) and not key:
-            unmapped.append(text)
-            current = None
-            continue
+        # Si rien encore détecté, tout va dans Introduction
+        if current is None and text:
+            current = "Introduction"
 
-        if current is None:
-            # contenu non vide, pas un titre probable -> Introduction
-            if getattr(el, "name", None) in {"p","div","section"} and el.get_text(" ", strip=True):
-                if "Introduction" in out:
-                    current = "Introduction"
-            
         if current in out:
             out[current] += str(el)
-
-    try:
-        st.session_state["unmapped_headings"] = unmapped
-    except Exception:
-        pass
 
     return out
 
 # ================= NETTOYAGE DES LISTES =================
-
-def _convert_numbered_paragraphs_to_ol(parent: Tag) -> bool:
-    changed = False
-    children = list(parent.children)
-    i = 0
-    while i < len(children):
-        node = children[i]
-        if getattr(node, "name", None) == "p":
-            if node.get("data-fixed-numbering") == "1":
-                i += 1
-                continue
-            text = node.get_text(" ", strip=True)
-            m = NUM_PREFIX_RE.match(text or "")
-            if m:
-                ol = parent.new_tag("ol")
-                parent.insert_before(ol, node)
-                last_li = None
-
-                j = i
-                while j < len(children):
-                    cur = children[j]
-                    name = getattr(cur, "name", None)
-
-                    if name == "p":
-                        t = cur.get_text(" ", strip=True)
-                        m2 = NUM_PREFIX_RE.match(t or "")
-                        if m2:
-                            li = parent.new_tag("li")
-                            first_txt = None
-                            for c in cur.contents:
-                                if isinstance(c, NavigableString):
-                                    first_txt = c
-                                    break
-                            if first_txt:
-                                m3 = NUM_PREFIX_RE.match(str(first_txt))
-                                if m3:
-                                    first_txt.replace_with(first_txt[m3.end():])
-                            for c in list(cur.contents):
-                                li.append(c.extract())
-                            cur.decompose()
-                            ol.append(li)
-                            last_li = li
-                            j += 1
-                            changed = True
-                            continue
-
-                        if last_li and t and not _is_bullet_only_text(t) and not _is_section_heading_p(cur):
-                            last_li.append(cur.extract())
-                            children.pop(j)
-                            changed = True
-                            continue
-
-                        break
-
-                    elif name in ("ul", "ol") and last_li:
-                        last_li.append(cur.extract())
-                        children.pop(j)
-                        changed = True
-                        continue
-                    else:
-                        break
-
-                children = list(parent.children)
-                i = list(parent.children).index(ol) + 1
-                continue
-        i += 1
-    return changed
-
-def _merge_split_ol_blocks(soup: BeautifulSoup) -> bool:
-    changed = False
-    for ol in list(soup.find_all("ol")):
-        sib = ol.find_next_sibling()
-        if sib is None:
-            continue
-
-        trail = []
-        cur = sib
-        while cur is not None and getattr(cur, "name", None) == "p" and not _is_section_heading_p(cur):
-            trail.append(cur)
-            cur = cur.find_next_sibling()
-
-        if cur is not None and getattr(cur, "name", None) == "ol":
-            lis = ol.find_all("li", recursive=False)
-            last_li = lis[-1] if lis else None
-
-            if trail:
-                if last_li is None:
-                    last_li = soup.new_tag("li")
-                    ol.append(last_li)
-                for p in trail:
-                    last_li.append(p.extract())
-
-            for li in list(cur.find_all("li", recursive=False)):
-                ol.append(li.extract())
-
-            cur.decompose()
-            changed = True
-
-    return changed
-
-def _promote_nested_ol_to_siblings(soup: BeautifulSoup) -> bool:
-    changed = False
-    for li in list(soup.find_all("li")):
-        parent = li.parent
-        if getattr(parent, "name", None) != "ol":
-            continue
-
-        inner_ols = [c for c in li.contents if getattr(c, "name", None) == "ol"]
-        if len(inner_ols) != 1:
-            continue
-
-        inner = inner_ols[0]
-        sub_items = inner.find_all("li", recursive=False)
-        if not (2 <= len(sub_items) <= 6):
-            continue
-
-        direct_text = "".join(t for t in li.find_all(string=True, recursive=False)).strip()
-        if len(direct_text) < 40:
-            continue
-
-        long_items = sum(1 for s in sub_items if len(s.get_text(" ", strip=True)) >= 30)
-        if long_items < len(sub_items) // 2:
-            continue
-
-        anchor = li
-        for sub in list(sub_items):
-            anchor.insert_after(sub.extract())
-            anchor = sub
-
-        inner.decompose()
-        changed = True
-
-    return changed
 
 def _fix_lists_in_soup(soup):
     changed = True
@@ -603,68 +427,65 @@ def fix_section_numbering(html: str, section_key: str) -> str:
     if section_key not in EXPECTED:
         return html
 
-    # normalisation + alias (pluriel / sans accent)
     def nrm(s: str) -> str:
         s = re.sub(r'^\s*(?:[\(\[]?\d+(?:\.\d+)*[\)\.]?|[ivxlcdm]+[\)\.]|[A-Z]\)|•|–|—|-|\*)\s*', '', s or '', flags=re.I)
-        s = _strip_accents((s or "").lower()).strip().replace(" d’", " d'").replace(" l’", " l'")
+        s = _strip_accents((s or "").lower()).replace("\u00A0"," ").strip()
+        s = s.replace(" d’"," d'").replace(" l’"," l'")
         return " ".join(s.split())
 
     expected = list(EXPECTED[section_key])
     alias = { nrm(x): x for x in expected }
-    # Budget : variantes
-    alias[nrm("Couvertures des intérêts")] = "Couverture des intérêts"
-    alias[nrm("couverture des interets")] = "Couverture des intérêts"
-    alias[nrm("couvertures des interets")] = "Couverture des intérêts"
+    # Budget : variantes de "Couverture(s) des intérêts"
+    if section_key == 'budget_fr':
+        alias[nrm("Couvertures des intérêts")] = "Couverture des intérêts"
+        alias[nrm("couverture des interets")]  = "Couverture des intérêts"
+        alias[nrm("couvertures des interets")] = "Couverture des intérêts"
 
-    # Bonnes raisons : Fiducie devient #1 si Assurance absente
-    if section_key == 'bonnes_raisons_fr':
-        pass  # on décidera après collecte
-
-    # Collecter candidats
-    found = {}
-    for el in soup.find_all(['h1','h2','h3','h4','h5','h6','p','strong','b','em','i','li']):
+    # Collecter premières occurrences
+    first = {}
+    for el in soup.find_all(['h1','h2','h3','h4','h5','h6','p','li','strong','b','em','i','u']):
         txt = el.get_text(" ", strip=True)
         if not txt or len(txt) > 180:
             continue
         key = alias.get(nrm(txt))
-        if key and key not in found:
-            found[key] = el
+        if key and key not in first:
+            first[key] = el
 
-    # Réordonner attendu selon règle Bonnes raisons
+    # Bonnes raisons : Fiducie devient #1 si Assurance absente
     if section_key == 'bonnes_raisons_fr':
-        has_assurance = "Une assurance sur 100% du capital investi" in found
-        expected = (["Une fiducie-sûreté sur l'actif"] if not has_assurance
-                    else ["Une assurance sur 100% du capital investi", "Une fiducie-sûreté sur l'actif"])
+        if "Une assurance sur 100% du capital investi" not in first:
+            expected = ["Une fiducie-sûreté sur l'actif"]
+        else:
+            expected = [
+                "Une assurance sur 100% du capital investi",
+                "Une fiducie-sûreté sur l'actif",
+            ]
 
-    # Construire la liste finale (inclure Stress test seulement s'il existe)
-    order = [t for t in expected if t in found]
-    if section_key == 'budget_fr' and "Stress test" in found and "Stress test" not in order:
+    # Ordre final (et Stress test seulement s'il existe)
+    order = [x for x in expected if x in first]
+    if section_key == 'budget_fr' and "Stress test" in first and "Stress test" not in order:
         order.append("Stress test")
 
-    def set_title(el: Tag, text: str, italic_underline: bool):
-        # Ne jamais renuméroter un item déjà dans une <li> (on laisse <ol> numéroter)
-        in_li = bool(el.name == "li" or el.find_parent("li"))
-        new_text = text if not in_li else text.split(". ", 1)[-1]  # enlever "1. " si on est dans une liste
+    # Appliquer numérotation visible (sans déclencher d'autres conversions)
+    def set_title(el: Tag, label_text: str, italic_underline: bool):
+        # Si déjà dans <li>, on n'ajoute pas "1. " (la liste affichera le numéro si elle existe)
+        in_li = (el.name == "li") or bool(el.find_parent("li"))
+        if in_li and ". " in label_text:
+            label_text = label_text.split(". ", 1)[-1]
 
-        # Marquer le conteneur pour bloquer la conversion <ol> en aval
-        container = el if el.name in {"p","li"} else el.find_parent(["p","li"]) or el
-        try:
-            container["data-fixed-numbering"] = "1"
-        except Exception:
-            pass
-
-        # Remplacement + style Budget (italique + souligné)
+        # Remplacement "propre"
         target = el
+        target.clear()
         if italic_underline:
-            u = soup.new_tag("u"); u.string = new_text
+            u = soup.new_tag("u"); u.string = label_text
             em = soup.new_tag("em"); em.append(u)
-            target.clear(); target.append(em)
+            target.append(em)
         else:
-            target.clear(); target.string = new_text
+            target.string = label_text
 
     for i, title in enumerate(order, 1):
-        el = found[title]
-        label = f"{i}. {title}"
+        el = first[title]
+        label = f"{i}. {title}" if section_key != 'budget_fr' else f"{i}. {title}"
         set_title(el, label, italic_underline=(section_key == 'budget_fr'))
 
     return soup.div.decode_contents()
@@ -679,6 +500,10 @@ def apply_fixed_numbering(fr_payload: dict) -> dict:
             result[key] = fix_section_numbering(result[key], key)
     
     return result
+
+sections_html["Facteurs de risque"]        = fix_section_numbering(sections_html.get("Facteurs de risque",""), 'points_attention_fr')
+sections_html["Les bonnes raisons d'investir"] = fix_section_numbering(sections_html.get("Les bonnes raisons d'investir",""), 'bonnes_raisons_fr')
+sections_html["Budget de l'opération"]     = fix_section_numbering(sections_html.get("Budget de l'opération",""), 'budget_fr')
 
 # ================= CHARGEMENT DE LA CONFIGURATION =================
 
