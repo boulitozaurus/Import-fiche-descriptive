@@ -427,7 +427,7 @@ def prepare_section_html(html: str):
     _fix_lists_in_soup(soup)
 
     cleaned = soup.div.decode_contents()
-    cleaned = re.sub(r'(?is)le contenu\s+g[éè]n[éè]r[éè]\s+par l[''' ]?ia\s+peut\s+être\s+incorrect\.?', '', cleaned)
+    cleaned = re.sub(r"(?is)le contenu\s+g[éè]n[éè]r[éè]\s+par l[''' ]?ia\s+peut\s+être\s+incorrect\.?", '', cleaned)
 
     return cleaned, downloads
 
