@@ -24,6 +24,8 @@ import mammoth
 import streamlit as st
 from bs4 import BeautifulSoup, Tag, NavigableString
 
+from io import BytesIO
+from typing import Any
 
 # -----------------------------------------------------------------------------
 #                               CONFIG / CONSTANTES
@@ -147,20 +149,17 @@ BUDGET_TITLES = [
 # -----------------------------------------------------------------------------
 
 def docx_to_html(file_bytes: bytes) -> str:
-    """Convertit un DOCX en HTML via Mammoth (avec styles par défaut)."""
-    # style_map minimal : on laisse Mammoth générer h1..hN, p, ul/ol/li...
+    # Mammoth est plus sûr quand on lui donne un "file-like" (BytesIO)
     result = mammoth.convert_to_html(
-        file_bytes,
+        BytesIO(file_bytes),
         style_map="",
         include_default_style_map=True,
         convert_image=mammoth.images.inline(lambda image: {"src": _img_to_data_uri(image)}),
     )
     html = result.value or ""
-    # Aucun traitement "magique" sur les images ici : on renvoie tel quel.
     return html
 
-
-def _img_to_data_uri(image: mammoth.images.Image) -> str:
+def _img_to_data_uri(image: Any) -> str:
     """Image Mammoth -> data URI (png/jpeg/gif, sinon base64 générique)."""
     content_type = image.content_type or "application/octet-stream"
     data = image.read()
