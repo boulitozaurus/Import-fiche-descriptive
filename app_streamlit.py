@@ -270,11 +270,24 @@ def load_heading_map() -> Dict[str, str]:
             return m
     return DEFAULT_HEADING_MAP
 
+def inject_css():
+    st.markdown("""
+    <style>
+      .sect p { margin:.35rem 0; }
+      .sect ol, .sect ul { margin:.35rem 0 .55rem 1.4rem; padding-left:1.4rem; list-style-position:outside; }
+      .sect li { margin:.15rem 0; }
+      .sect table { width:100%; border-collapse:collapse; }
+      .sect td, .sect th { border:1px solid #ccc; padding:6px; }
+    </style>
+    """, unsafe_allow_html=True)
+
 # ---------------- UI ----------------
 
 st.set_page_config(page_title="Auto-Mapping Word", layout="wide")
 st.title("Auto-Mapping Word")
 st.caption("Déposez votre fiche .docx : mapping fixe Word→PDF/CRM")
+if "unsupported_images" not in st.session_state:
+    st.session_state["unsupported_images"] = []
 
 # Load schema + map
 def norm(s: str) -> str:
@@ -301,10 +314,11 @@ if uploaded is not None:
     with open(tmp_path, "wb") as f:
         f.write(uploaded.read())
 
-    # 1) Conversion DOCX -> HTML (Mammoth) puis découpe par titres
-        html = docx_to_html(str(tmp_path))
-        sections = split_sections_by_headings(html, expected_word_headings)
-        sections_norm = {_norm(k): v for k, v in sections.items()}
+# 1) Conversion DOCX -> HTML (Mammoth) puis découpe par titres
+    html = docx_to_html(str(tmp_path))
+    sections = split_sections_by_headings(html, expected_word_headings)
+    sections_norm = {_norm(k): v for k, v in sections.items()}
+
 
     # 2) Auto-mapping Word -> PDF/CRM (valeurs = HTML)
     fr_payload = {}
@@ -326,24 +340,14 @@ if uploaded is not None:
     st.dataframe(rows)
 
     # 3) Affichage vertical fidèle (HTML)
-    st.header("Aperçu des sections (mise en forme préservée)")
+st.header("Aperçu des sections (mise en forme préservée)")
 inject_css()
-    def inject_css():
-    st.markdown("""
-            <style>
-              .sect p { margin:.35rem 0; }
-              .sect ol, .sect ul { margin:.35rem 0 .55rem 1.4rem; padding-left:1.4rem; list-style-position:outside; }
-              .sect li { margin:.15rem 0; }
-              /* paragraphes “explicatifs” insérés par Word dans le même point: Mammoth les garde bien */
-              .sect table { width:100%; border-collapse:collapse; }
-              .sect td, .sect th { border:1px solid #ccc; padding:6px; }
-            </style>
-            """, unsafe_allow_html=True)
+
+for fdef in fields:
+    key = fdef["key"]; label = fdef["label"]
+    html_content = fr_payload.get(key, "")
+    st.subheader(label)
+    st.markdown(f"<div class='sect'>{html_content or '<p><em>(vide)</em></p>'}</div>", unsafe_allow_html=True)
+    st.divider()
 
 
-    for fdef in fields:
-        key = fdef["key"]; label = fdef["label"]
-        html_content = fr_payload.get(key, "")
-        st.subheader(label)
-        st.markdown(f"<div class='sect'>{html_content or '<p><em>(vide)</em></p>'}</div>", unsafe_allow_html=True)
-        st.divider()
