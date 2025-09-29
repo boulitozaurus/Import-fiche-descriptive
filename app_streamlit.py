@@ -30,38 +30,27 @@ def _data_uri(image):
     data = base64.b64encode(image.read()).decode("ascii")
     return {"src": f"data:{image.content_type};base64,{data}"}
 
-def split_sections_by_headings(html: str, expected_headings: list[str]) -> dict[str, str]:
-    # normalisation légère
-    norm = lambda s: re.sub(r"\s+", " ", s or "").strip().lower().rstrip(" :")
-    wanted = {norm(h): h for h in expected_headings}
+def split_sections_by_headings(html: str, heading_index: dict[str, str]) -> dict[str, str]:
+    # normalise : retire numérotation + ":" final, supprime accents / casse / espaces
+    def nrm(s: str) -> str:
+        return _norm(_strip_leading_numbering((s or "").rstrip(" :")))
 
     soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
-    out = {h: "" for h in expected_headings}
-
-    def _is_heading_like(el) -> str | None:
-        """Retourne le titre attendu si 'el' ressemble à un titre connu."""
-        if not hasattr(el, "get_text"):
-            return None
-        txt_n = norm(el.get_text())
-        if not txt_n:
-            return None
-        # cas 1 : vrai <h1>.. <h6>
-        if getattr(el, "name", None) in {"h1","h2","h3","h4","h5","h6"}:
-            return wanted.get(txt_n)
-        # cas 2 : <p> dont le texte correspond pile à un titre (souvent <p><strong>…</strong></p>)
-        if el.name == "p" and txt_n in wanted and len(el.get_text(strip=True)) <= 120:
-            # évite de confondre avec une phrase classique : pas de point/point-excl./interro à la fin
-            if not re.search(r"[.!?]\s*$", el.get_text()):
-                return wanted[txt_n]
-        return None
-
+    out = {v: "" for v in set(heading_index.values())}
     current = None
-    # on parcourt tous les éléments de premier niveau
+
     for el in soup.div.children:
-        key = _is_heading_like(el)
+        if not hasattr(el, "get_text"):   # ignorer les strings blanches
+            continue
+
+        key = None
+        if getattr(el, "name", None) in {"h1","h2","h3","h4","h5","h6","p"}:
+            key = heading_index.get(nrm(el.get_text()))
+
         if key:
             current = key
             continue
+
         if current is not None:
             out[current] += str(el)
 
@@ -276,7 +265,34 @@ def prepare_section_html(html: str):
 
     # 3.c) réparer les src="data:..." orphelins en réelles balises <img>
     cleaned = _fix_stray_data_uri(soup.div.decode_contents())
+    # 2nd-chance : si une variante est passée à travers, on la supprime au niveau du HTML final
+    cleaned = re.sub(r'(?is)le contenu\s+g[ée]n[ée]r[ée]\s+par l[’\' ]?ia\s+peut\s+être\s+incorrect\.?', '', cleaned)
     return cleaned, downloads
+
+
+def _strip_leading_numbering(s: str) -> str:
+    """Supprime une numérotation de début de ligne: '1.2. ', 'I. ', 'A) ', '• ', '-', '– ' ..."""
+    return re.sub(r'^\s*(?:[\(\[]?\d+(?:\.\d+)*[\)\.]?|[ivxlcdm]+[\)\.]|[A-Z]\)|•|–|-)\s*', '', s or '', flags=re.I)
+
+def build_heading_index(expected_headings: list[str], word_to_pdf: dict[str, str]) -> dict[str, str]:
+    """
+    Construit un index de correspondance {titre_normalisé -> titre_attendu}
+    en acceptant :
+      - le titre Word,
+      - le libellé PDF/CRM,
+      - et ces mêmes titres sans numérotation initiale.
+    + quelques alias manuels utiles.
+    """
+    idx: dict[str, str] = {}
+    for wh in expected_headings:
+        for alias in {wh, word_to_pdf.get(wh, ''), _strip_leading_numbering(wh)}:
+            if alias:
+                idx[_norm(alias)] = wh
+
+    # Aliases manuels fréquents
+    idx[_norm("description")] = "Introduction"
+    idx[_norm("contexte & usage des fonds")] = "Contexte et usage des fonds"
+    return idx
 
 # ---------------- Load schema + fixed heading map ----------------
 
@@ -398,7 +414,8 @@ if uploaded is not None:
 
 # 1) Conversion DOCX -> HTML (Mammoth) puis découpe par titres
     html = docx_to_html(str(tmp_path))
-    sections = split_sections_by_headings(html, expected_word_headings)
+    heading_index = build_heading_index(expected_word_headings, word_to_pdf)
+    sections = split_sections_by_headings(html, heading_index)
     sections_norm = {_norm(k): v for k, v in sections.items()}
 
 
