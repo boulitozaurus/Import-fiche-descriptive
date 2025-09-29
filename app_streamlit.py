@@ -175,20 +175,38 @@ def _html_escape(s: str) -> str:
 
 def strip_leading_title_block(html: str) -> str:
     soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
-    # 1) supprimer le premier H1/H2/H3 en tête de section
-    for child in list(soup.div.children):
-        if getattr(child, "name", None) in {"h1","h2","h3"}:
+
+    # sauter les nœuds vides/espaces au tout début
+    def _iter_first_blocks():
+        for child in soup.div.children:
+            if isinstance(child, NavigableString) and not str(child).strip():
+                continue
+            yield child
+            break
+
+    for child in list(_iter_first_blocks()):
+        name = getattr(child, "name", None)
+        if name in {"h1","h2","h3"}:
             child.decompose()
             break
-        # 2) tolérance : si la première ligne est un <p> "très majuscule", on la retire aussi
-        if getattr(child, "name", None) == "p":
+
+        if name == "p":
             t = child.get_text(" ", strip=True) or ""
-            if t and len(t) <= 120:
-                letters = [c for c in t if c.isalpha()]
-                upper_ratio = (sum(1 for c in letters if c.isupper()) / len(letters)) if letters else 0
-                if upper_ratio >= 0.6:
-                    child.decompose()
+            # (a) Beaucoup de majuscules (= titre plaqué)
+            letters = [c for c in t if c.isalpha()]
+            upper_ratio = (sum(1 for c in letters if c.isupper()) / len(letters)) if letters else 0
+
+            # (b) Ligne courte avec tiret long/court (pattern "Nom – Lieu"), pas de point final
+            has_dash = (" - " in t) or (" – " in t)
+            short_line = len(t) <= 120 and has_dash and not re.search(r"[\.!?]$", t)
+
+            # (c) Ligne strictement en gras (un seul enfant <strong>/<b>) et courte
+            is_strong_only = (len(child.contents) == 1 and getattr(child.contents[0], "name", None) in {"strong","b"} and len(t) <= 120)
+
+            if upper_ratio >= 0.6 or short_line or is_strong_only:
+                child.decompose()
             break
+
     return soup.div.decode_contents()
 
 # ================= GESTION DES IMAGES =================
@@ -492,18 +510,19 @@ def fix_section_numbering(html: str, section_key: str) -> str:
 
     # Appliquer la numérotation visible (et neutraliser la numérotation auto des <ol>)
     def set_title(el: Tag, label_text: str, italic_underline: bool):
-        # 1) Si le titre est dans une <li>, neutraliser puces et, si possible, convertir en <p>
         li = el if el.name == "li" else el.find_parent("li")
         if li:
-            # couper les puces auto sur OL/UL
+            # Couper la numérotation/puces auto
             ol = li.find_parent("ol");  ul = li.find_parent("ul")
             if ol: ol["data-noautonum"] = "1"
             if ul: ul["data-noautonum"] = "1"
     
-            # <li> "titre pur" ? (pas de blocs enfants => on remplace par <p>)
-            has_blocks = li.find(["p","div","ol","ul","table","h1","h2","h3","h4","h5","h6"])
+            # La <li> contient-elle d'autres blocs (p/div/ol/ul/table/hx) ?
+            has_blocks = bool(li.find(["p","div","ol","ul","table","h1","h2","h3","h4","h5","h6"]))
             only_text = (li.get_text(" ", strip=True) or "")
-            if not has_blocks and len(only_text) <= 120:
+    
+            if not has_blocks and len(only_text) <= 120 and el == li:
+                # Cas simple : la li est juste un titre -> remplacer par <p>
                 p = soup.new_tag("p")
                 if italic_underline:
                     u = soup.new_tag("u"); u.string = label_text
@@ -513,19 +532,31 @@ def fix_section_numbering(html: str, section_key: str) -> str:
                     p.string = label_text
                 li.replace_with(p)
                 return
-            # sinon : on réécrit in-situ dans le li
-            target = li
-        else:
-            target = el
     
-        # 2) Écriture du label (on garde notre "1. ...")
-        target.clear()
+            # Cas courant Budget : la <li> contient déjà le texte “titre” + du contenu -> on sort le titre
+            p = soup.new_tag("p")
+            if italic_underline:
+                u = soup.new_tag("u"); u.string = label_text
+                em = soup.new_tag("em"); em.append(u)
+                p.append(em)
+            else:
+                p.string = label_text
+    
+            li.insert_before(p)  # 👈 le titre est désormais hors de la liste (plus d'indentation)
+            try:
+                el.decompose()    # on supprime l'élément titre d'origine à l'intérieur de la <li>
+            except Exception:
+                pass
+            return
+    
+        # Pas dans une liste : réécriture in-situ
+        el.clear()
         if italic_underline:
             u = soup.new_tag("u"); u.string = label_text
             em = soup.new_tag("em"); em.append(u)
-            target.append(em)
+            el.append(em)
         else:
-            target.string = label_text
+            el.string = label_text
 
     for i, title in enumerate(order, 1):
         el = first[title]
