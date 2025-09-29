@@ -20,6 +20,7 @@ from docx.oxml.text.paragraph import CT_P
 import base64
 from docx.text.run import Run
 from docx.oxml.ns import qn
+import difflib
 
 # ================= CONFIGURATION =================
 HEADING_STYLES = {"Heading 1","Heading 2","Heading 3","Titre 1","Titre 2","Titre 3","Title","Subtitle"}
@@ -53,15 +54,9 @@ DEFAULT_HEADING_MAP = {
     "Marché et références": "Marché et références",
     "Budget de l'opération": "Budget",
     "L'opérateur": "Présentation de l'opérateur",
-    "Track record et opérations en cours": "Track record",
-    "Track record en Crowdlending": "Track record",
     "Structure et Management": "Structure et Management",
     "Actionnariat et structure de l'opération": "Actionnariat",
     "Finances": "Finances",
-    # Alias pour éviter les doublons
-    "PRESENTATION DE L'OPERATION": "Présentation de l'opération",
-    "LES BONNES RAISONS D'INVESTIR": "Les bonnes raisons d'investir",
-    "PRESENTATION DE L'OPERATEUR": "Présentation de l'opérateur",
 }
 
 DEFAULT_SCHEMA = {
@@ -95,7 +90,22 @@ def _strip_accents(x: str) -> str:
         return x
 
 def _norm(s: str) -> str:
-    return " ".join(_strip_accents((s or "")).lower().replace("'","'").split())
+    s = (s or "")
+    # Normaliser espaces & ponctuation “exotiques”
+    s = s.replace("\u00A0", " ")  # NBSP -> espace
+    s = s.translate(str.maketrans({
+        "\u2019": "'",  # apostrophe courbe -> '
+        "\u2018": "'",
+        "\u2032": "'",
+        "\u201C": '"',  # guillemets courbes -> "
+        "\u201D": '"',
+        "\u2013": "-",  # en dash/em dash/minus -> -
+        "\u2014": "-",
+        "\u2212": "-",
+    }))
+    s = re.sub(r"\s+", " ", s).strip()
+    s = _strip_accents(s).lower()
+    return s
 
 def _strip_leading_numbering(s: str) -> str:
     return re.sub(r'^\s*(?:[\(\[]?\d+(?:\.\d+)*[\)\.]?|[ivxlcdm]+[\)\.]|[A-Z]\)|•|—|-)\s*', '', s or '', flags=re.I)
@@ -107,10 +117,18 @@ def _is_bullet_only_text(text: str) -> bool:
 def _is_section_heading_p(p: Tag) -> bool:
     if p.name != "p":
         return False
-    txt = p.get_text(" ", strip=True)
+    txt = p.get_text(" ", strip=True) or ""
     if not txt:
         return False
-    if len(txt) <= 90 and (p.find(["strong", "b"]) or _HEADING_RE.match(txt)):
+    # Normaliser pour matcher même avec ’, accents, numérotation, ":" final, etc.
+    norm_txt = _norm(_strip_leading_numbering(txt)).rstrip(" :")
+    HEADING_HINTS = [
+        "introduction","contexte","points d attention","bonnes raisons",
+        "projet","presentation de l operation","localisation","planning",
+        "budget","operateur","track record","structure","management",
+        "actionnariat","finances","marche","references"
+    ]
+    if len(txt) <= 90 and (p.find(["strong","b"]) or any(h in norm_txt for h in HEADING_HINTS)):
         return True
     return False
 
@@ -174,39 +192,79 @@ def build_heading_index(expected_headings: list[str], word_to_pdf: dict[str, str
     return idx
 
 def split_sections_by_headings(html: str, heading_index: dict[str, str]) -> dict[str, str]:
-    def nrm(s: str) -> str:
-        return _norm(_strip_leading_numbering((s or "").rstrip(" :")))
+    """
+    Découpe robuste :
+      - normalise le texte avant lookup
+      - fallback: mots-clés + fuzzy si pas d'égalité exacte
+      - coupe la section courante dès qu'un "quasi-titre" non mappé est rencontré (évite les débordements)
+    """
+    def nrm_title(s: str) -> str:
+        s = _strip_leading_numbering((s or "")).rstrip(" :")
+        return _norm(s)
 
     soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
     out = {v: "" for v in set(heading_index.values())}
     current = None
+    unmapped = []
+
+    # Prépare un set/list pour fuzzy
+    known_norms = list(heading_index.keys())
+
+    def best_match(n: str) -> str | None:
+        # 1) direct
+        if n in heading_index:
+            return heading_index[n]
+        # 2) variantes simples (retirer - et ' pour rattraper)
+        n2 = re.sub(r"[-']", " ", n)
+        if n2 in heading_index:
+            return heading_index[n2]
+        # 3) mots-clés (secours)
+        for kw, wh in KEYWORD_TO_WH.items():
+            if kw in n:
+                return wh
+        # 4) fuzzy (tolérance faible pour éviter les erreurs)
+        close = difflib.get_close_matches(n, known_norms, n=1, cutoff=0.86)
+        if close:
+            return heading_index[close[0]]
+        return None
 
     for el in soup.div.children:
         if not hasattr(el, "get_text"):
             continue
 
+        name = getattr(el, "name", None)
+        text = el.get_text(" ", strip=True) if name in {"h1","h2","h3","h4","h5","h6","p"} else ""
         key = None
-        if getattr(el, "name", None) in {"h1","h2","h3","h4","h5","h6","p"}:
-            key = heading_index.get(nrm(el.get_text()))
+
+        if text:
+            norm_text = nrm_title(text)
+            key = heading_index.get(norm_text)
+
+            if not key:
+                # Si ça ressemble à un titre, on tente le secours (keywords/fuzzy)
+                if _is_section_heading_p(el):
+                    key = best_match(norm_text)
 
         if key:
+            # Nouveau titre reconnu -> on change de section courante
             current = key
+            continue
+
+        # Coupe l'accumulation si c'est probablement un titre non mappé (évite les fuites)
+        if name in {"h1","h2","h3","h4","h5","h6","p"} and _is_section_heading_p(el) and not key:
+            unmapped.append(text)
+            current = None
             continue
 
         if current is not None:
             out[current] += str(el)
 
-    # NOUVELLE ÉTAPE : Fusionner les sections qui ont du contenu dupliqué
-    # Si une section principale est vide mais qu'on trouve du contenu ailleurs, on fusionne
-    for key, content in list(out.items()):
-        if content.strip():
-            # Chercher d'autres clés qui pourraient être des alias
-            for other_key in list(out.keys()):
-                if other_key != key and _norm(other_key) == _norm(key):
-                    if out[other_key].strip():
-                        out[key] += out[other_key]
-                        out[other_key] = ""
-    
+    # (option) exposer en débogage ce qui n'a pas matché
+    try:
+        st.session_state["unmapped_headings"] = unmapped
+    except Exception:
+        pass
+
     return out
 
 # ================= NETTOYAGE DES LISTES =================
