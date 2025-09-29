@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Dict, List
 from streamlit.components.v1 import html as st_html
 import mammoth
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 import uuid
+import re
 # ---------------- Utils: headings + parsing ----------------
 from docx import Document
 from docx.table import _Cell, Table
@@ -25,6 +26,26 @@ HEADING_STYLES = {"Heading 1","Heading 2","Heading 3","Titre 1","Titre 2","Titre
 NS_W = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
 NS_A = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main",
         "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships"}
+
+
+HEADING_WORDS = (
+    "introduction|contexte|les points d'attention|les bonnes raisons|"
+    "projet|localisation|planning|budget|opérateur|opérateur|actionnariat|finances?"
+)
+
+_HEADING_RE = re.compile(rf"^\s*(?:{HEADING_WORDS})\b", re.I)
+
+def _is_section_heading_p(p: Tag) -> bool:
+    """Heuristique simple pour ne PAS aspirer des titres de section dans un <li>."""
+    if p.name != "p":
+        return False
+    txt = p.get_text(" ", strip=True)
+    if not txt:
+        return False
+    # court, fort, ou commence par un mot de section connu → probablement un titre
+    if len(txt) <= 90 and (p.find(["strong", "b"]) or _HEADING_RE.match(txt)):
+        return True
+    return False
 
 def _data_uri(image):
     data = base64.b64encode(image.read()).decode("ascii")
@@ -392,6 +413,48 @@ def _fix_lists_in_soup(soup):
                     ul.replace_with(only_lists[0])
                     changed = True
 
+        def _merge_split_ol_blocks(soup: BeautifulSoup) -> bool:
+            """
+            Si l'on trouve : <ol> ... </ol> <p>...</p> <ol>...</ol>
+            - rattache les <p> intermédiaires au dernier <li> du premier <ol>
+            - fusionne les items du second <ol> dans le premier
+            """
+            changed = False
+        
+            # on parcourt tous les <ol> top-level
+            for ol in list(soup.find_all("ol")):
+                sib = ol.find_next_sibling()
+                if sib is None:
+                    continue
+        
+                # on collecte des <p> intermédiaires "non-titres"
+                trail = []
+                cur = sib
+                while cur is not None and cur.name == "p" and not _is_section_heading_p(cur):
+                    trail.append(cur)
+                    cur = cur.find_next_sibling()
+        
+                # si derrière ces <p> on retombe sur un autre <ol> → fusion
+                if cur is not None and cur.name == "ol":
+                    last_li = None
+                    lis = ol.find_all("li", recursive=False)
+                    if lis:
+                        last_li = lis[-1]
+        
+                    # rattacher les <p> à la fin du dernier <li> du premier <ol>
+                    if last_li:
+                        for p in trail:
+                            last_li.append(p.extract())
+        
+                    # déplacer les <li> du second <ol> dans le premier
+                    for li in list(cur.find_all("li", recursive=False)):
+                        ol.append(li.extract())
+        
+                    # supprimer le second <ol>
+                    cur.decompose()
+                    changed = True
+        
+            return changed
 
         # 5) Fusionner <ol> consécutifs pour éviter 1., puis 1. …
         for ol in list(soup.find_all("ol")):
