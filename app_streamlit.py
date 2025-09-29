@@ -32,21 +32,37 @@ def _data_uri(image):
 
 def split_sections_by_headings(html: str, expected_headings: list[str]) -> dict[str, str]:
     # normalisation légère
-    norm = lambda s: re.sub(r"\s+", " ", s).strip().lower().rstrip(" :")
+    norm = lambda s: re.sub(r"\s+", " ", s or "").strip().lower().rstrip(" :")
     wanted = {norm(h): h for h in expected_headings}
 
     soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
     out = {h: "" for h in expected_headings}
 
+    def _is_heading_like(el) -> str | None:
+        """Retourne le titre attendu si 'el' ressemble à un titre connu."""
+        if not hasattr(el, "get_text"):
+            return None
+        txt_n = norm(el.get_text())
+        if not txt_n:
+            return None
+        # cas 1 : vrai <h1>.. <h6>
+        if getattr(el, "name", None) in {"h1","h2","h3","h4","h5","h6"}:
+            return wanted.get(txt_n)
+        # cas 2 : <p> dont le texte correspond pile à un titre (souvent <p><strong>…</strong></p>)
+        if el.name == "p" and txt_n in wanted and len(el.get_text(strip=True)) <= 120:
+            # évite de confondre avec une phrase classique : pas de point/point-excl./interro à la fin
+            if not re.search(r"[.!?]\s*$", el.get_text()):
+                return wanted[txt_n]
+        return None
+
     current = None
+    # on parcourt tous les éléments de premier niveau
     for el in soup.div.children:
-        tag = getattr(el, "name", None)
-        if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
-            key = wanted.get(norm(el.get_text()))
-            if key:
-                current = key
+        key = _is_heading_like(el)
+        if key:
+            current = key
             continue
-        if current:
+        if current is not None:
             out[current] += str(el)
 
     return out
@@ -222,28 +238,43 @@ def _image_handler(image) -> dict:
     return {"src": f"data:{ctype};base64,{b64}"}
 
 def docx_to_html(path: str) -> str:
-    """Convertit le .docx en HTML avec Mammoth en utilisant notre handler d’images."""
+    """Convertit le .docx en HTML avec Mammoth (heading robustes + handler d’images)."""
+    style_map = """
+p[style-name='Heading 1'] => h1:fresh
+p[style-name='Heading 2'] => h2:fresh
+p[style-name='Heading 3'] => h3:fresh
+p[style-name='Titre 1']   => h1:fresh
+p[style-name='Titre 2']   => h2:fresh
+p[style-name='Titre 3']   => h3:fresh
+"""
     with open(path, "rb") as f:
         result = mammoth.convert_to_html(
             f,
-            convert_image=mammoth.images.inline(_image_handler)  # <-- garde bien inline()
+            convert_image=mammoth.images.inline(_image_handler),
+            style_map=style_map
         )
     return result.value
 
 def prepare_section_html(html: str):
-    from bs4 import BeautifulSoup
     soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
     downloads = []
 
+    # 3.a) supprimer les phrases parasites type "Le contenu généré par l’IA peut être incorrect."
+    IA_PAT = re.compile(r"le contenu\s+g[ée]n[ée]r[ée]\s+par l[’' ]?ia\s+peut\s+être\s+incorrect\.?", re.I)
+    for p in list(soup.find_all("p")):
+        if IA_PAT.search(p.get_text(" ", strip=True)):
+            p.decompose()
+
+    # 3.b) images EMF/WMF : on remplace l'img transparente par rien, et on collecte un bouton DL
     for img in list(soup.find_all("img")):
         if img.get("data-unsupported") == "1":
             uid = img.get("data-uid")
             if uid and "img_store" in st.session_state and uid in st.session_state["img_store"]:
                 fname, data, ctype = st.session_state["img_store"][uid]
                 downloads.append((uid, fname, data, ctype))
-            img.decompose()  # enlève le pixel transparent
+            img.decompose()
 
-    # On répare au passage les 'src="data:..."' orphelins
+    # 3.c) réparer les src="data:..." orphelins en réelles balises <img>
     cleaned = _fix_stray_data_uri(soup.div.decode_contents())
     return cleaned, downloads
 
