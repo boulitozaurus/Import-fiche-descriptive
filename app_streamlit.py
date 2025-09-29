@@ -173,6 +173,24 @@ def _is_section_heading_p(p: Tag) -> bool:
 def _html_escape(s: str) -> str:
     return (s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
+def strip_leading_title_block(html: str) -> str:
+    soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
+    # 1) supprimer le premier H1/H2/H3 en tête de section
+    for child in list(soup.div.children):
+        if getattr(child, "name", None) in {"h1","h2","h3"}:
+            child.decompose()
+            break
+        # 2) tolérance : si la première ligne est un <p> "très majuscule", on la retire aussi
+        if getattr(child, "name", None) == "p":
+            t = child.get_text(" ", strip=True) or ""
+            if t and len(t) <= 120:
+                letters = [c for c in t if c.isalpha()]
+                upper_ratio = (sum(1 for c in letters if c.isupper()) / len(letters)) if letters else 0
+                if upper_ratio >= 0.6:
+                    child.decompose()
+            break
+    return soup.div.decode_contents()
+
 # ================= GESTION DES IMAGES =================
 
 def _image_handler(image) -> dict:
@@ -474,16 +492,33 @@ def fix_section_numbering(html: str, section_key: str) -> str:
 
     # Appliquer la numérotation visible (et neutraliser la numérotation auto des <ol>)
     def set_title(el: Tag, label_text: str, italic_underline: bool):
+        # 1) Si le titre est dans une <li>, neutraliser puces et, si possible, convertir en <p>
         li = el if el.name == "li" else el.find_parent("li")
         if li:
-            ol = li.find_parent("ol")
-            if ol:
-                ol["data-noautonum"] = "1"
-            ul = li.find_parent("ul")
-            if ul:
-                ul["data-noautonum"] = "1"
-                
-        target = el
+            # couper les puces auto sur OL/UL
+            ol = li.find_parent("ol");  ul = li.find_parent("ul")
+            if ol: ol["data-noautonum"] = "1"
+            if ul: ul["data-noautonum"] = "1"
+    
+            # <li> "titre pur" ? (pas de blocs enfants => on remplace par <p>)
+            has_blocks = li.find(["p","div","ol","ul","table","h1","h2","h3","h4","h5","h6"])
+            only_text = (li.get_text(" ", strip=True) or "")
+            if not has_blocks and len(only_text) <= 120:
+                p = soup.new_tag("p")
+                if italic_underline:
+                    u = soup.new_tag("u"); u.string = label_text
+                    em = soup.new_tag("em"); em.append(u)
+                    p.append(em)
+                else:
+                    p.string = label_text
+                li.replace_with(p)
+                return
+            # sinon : on réécrit in-situ dans le li
+            target = li
+        else:
+            target = el
+    
+        # 2) Écriture du label (on garde notre "1. ...")
         target.clear()
         if italic_underline:
             u = soup.new_tag("u"); u.string = label_text
@@ -631,6 +666,8 @@ if uploaded is not None:
         label = fdef["label"]
     
         raw_html = fr_payload.get(key, "")
+        if key == "description_fr":
+            raw_html = strip_leading_title_block(raw_html)
         clean_html, dls = prepare_section_html(raw_html)
         dlmap = {uid: (fname, data, ctype) for uid, fname, data, ctype in dls}
         
