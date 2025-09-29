@@ -99,6 +99,7 @@ KEYWORD_TO_WH = {
     "finances": "Finances",
     "contexte": "Contexte et usage des fonds",
     "description": "Introduction",
+    "finance": "Finances",
 }
 
 # ================= FONCTIONS UTILITAIRES =================
@@ -138,47 +139,37 @@ def _is_bullet_only_text(text: str) -> bool:
     return bool(BULLET_ONLY_RE.match(t))
 
 def _is_section_heading_p(p: Tag) -> bool:
-    name = getattr(p, "name", None)
-    if name in {"h1", "h2", "h3"}:
+    # Hx = toujours des titres
+    if getattr(p, "name", None) in {"h1","h2","h3"}:
         return True
-    if name != "p":
+    if getattr(p, "name", None) != "p":
         return False
 
     txt = p.get_text(" ", strip=True) or ""
-    if not txt:
+    if not txt or len(txt) > 90:
         return False
 
-    # Normalisation stricte
     norm_txt = _norm(_strip_leading_numbering(txt)).rstrip(" :")
 
-    # Doit être court
-    if len(txt) > 90:
-        return False
-
-    # Doit être "tout en gras" (ou presque)
-    # -> si le paragraphe contient au moins un strong/b ET que la concat des strings directes est courte
-    has_bold = bool(p.find(["strong", "b"]))
-    if not has_bold:
-        return False
-
-    # Le texte doit COMMENCER par un intitulé connu (et pas juste "contenir" un mot-clé)
+    # Titres attendus (début de ligne uniquement)
     KNOWN_STARTS = [
-        "introduction",
+        "introduction", "description",
         "contexte et usage des fonds",
         "facteurs de risque",
         "les bonnes raisons d investir",
-        "projet",
+        "projet", "presentation de l operation",
         "localisation",
-        "administratif et timing",
-        "marché et références",
-        "budget de l operation",
+        "administratif et timing", "planning",
+        "marche et references",
+        "budget de l operation", "budget",
         "l operateur",
-        "track record et operations en cours",
+        "track record et operations en cours", "track record",
         "structure et management",
-        "actionnariat et structure de l operation",
-        "finances",
+        "actionnariat et structure de l operation", "actionnariat",
+        "finances", "finance"
     ]
-    return any(norm_txt.startswith(h) for h in KNOWN_STARTS)
+    has_bold = bool(p.find(["strong","b"]))
+    return any(norm_txt.startswith(h) for h in KNOWN_STARTS) and (has_bold or True)
 
 def _html_escape(s: str) -> str:
     return (s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
@@ -326,6 +317,12 @@ def split_sections_by_headings(html: str, heading_index: dict[str, str]) -> dict
             current = None
             continue
 
+        if current is None:
+            # contenu non vide, pas un titre probable -> Introduction
+            if getattr(el, "name", None) in {"p","div","section"} and el.get_text(" ", strip=True):
+                if "Introduction" in out:
+                    current = "Introduction"
+            
         if current in out:
             out[current] += str(el)
 
@@ -345,6 +342,9 @@ def _convert_numbered_paragraphs_to_ol(parent: Tag) -> bool:
     while i < len(children):
         node = children[i]
         if getattr(node, "name", None) == "p":
+            if node.get("data-fixed-numbering") == "1":
+                i += 1
+                continue
             text = node.get_text(" ", strip=True)
             m = NUM_PREFIX_RE.match(text or "")
             if m:
@@ -577,17 +577,6 @@ def prepare_section_html(html: str):
 # ================= CORRECTION DE LA NUMÉROTATION =================
 
 def fix_section_numbering(html: str, section_key: str) -> str:
-    """
-    Force une numérotation visible et correcte pour:
-      - points_attention_fr : 1) Projet  2) Secteur  3) Défaut
-      - bonnes_raisons_fr  : 1) Assurance 100% (ou Fiducie si absente)  2) Fiducie
-      - budget_fr          : 1) Prix de revient  2) Financement et ratios
-                              3) Revenus et marges  4) Couverture des intérêts
-                              5) Stress test (si présent)
-    - Gère <p>, <li>, <h4..h6>, <strong>/<em>/<i>/<u>
-    - Retire toute numérotation préexistante pour éviter les doublons
-    - Budget : applique *italique + souligné* sur la ligne de titre
-    """
     if not html or not html.strip():
         return html
 
@@ -614,72 +603,69 @@ def fix_section_numbering(html: str, section_key: str) -> str:
     if section_key not in EXPECTED:
         return html
 
-    # alias normalisés (Budget)
+    # normalisation + alias (pluriel / sans accent)
     def nrm(s: str) -> str:
-        s = (s or "")
-        s = re.sub(r'^\s*(?:[\(\[]?\d+(?:\.\d+)*[\)\.]?|[ivxlcdm]+[\)\.]|[A-Z]\)|•|–|—|-|\*)\s*', '', s, flags=re.I)
-        s = s.replace("\u00A0", " ").strip().lower()
-        s = _strip_accents(s)
-        s = s.replace(" d’", " d'").replace(" l’", " l'")
+        s = re.sub(r'^\s*(?:[\(\[]?\d+(?:\.\d+)*[\)\.]?|[ivxlcdm]+[\)\.]|[A-Z]\)|•|–|—|-|\*)\s*', '', s or '', flags=re.I)
+        s = _strip_accents((s or "").lower()).strip().replace(" d’", " d'").replace(" l’", " l'")
         return " ".join(s.split())
 
     expected = list(EXPECTED[section_key])
+    alias = { nrm(x): x for x in expected }
+    # Budget : variantes
+    alias[nrm("Couvertures des intérêts")] = "Couverture des intérêts"
+    alias[nrm("couverture des interets")] = "Couverture des intérêts"
+    alias[nrm("couvertures des interets")] = "Couverture des intérêts"
 
-    expected_map = {nrm(lbl): lbl for lbl in expected}
-    if section_key == 'budget_fr':
-        # gérer le pluriel / variantes d'accents
-        expected_map[nrm("Couvertures des intérêts")] = "Couverture des intérêts"
-        expected_map[nrm("couverture des interets")] = "Couverture des intérêts"
-        expected_map[nrm("couvertures des interets")] = "Couverture des intérêts"
+    # Bonnes raisons : Fiducie devient #1 si Assurance absente
+    if section_key == 'bonnes_raisons_fr':
+        pass  # on décidera après collecte
 
-    # collecte des candidats (première occurrence par libellé)
-    first_by_label: dict[str, Tag] = {}
-    for elem in soup.find_all(['h1','h2','h3','h4','h5','h6','p','li','strong','b','em','i','u']):
-        txt = elem.get_text(" ", strip=True)
+    # Collecter candidats
+    found = {}
+    for el in soup.find_all(['h1','h2','h3','h4','h5','h6','p','strong','b','em','i','li']):
+        txt = el.get_text(" ", strip=True)
         if not txt or len(txt) > 180:
             continue
-        nn = nrm(txt)
-        # on accepte si le texte COMMENCE par un libellé attendu
-        for key_norm, canon in expected_map.items():
-            if nn.startswith(key_norm) and canon not in first_by_label:
-                first_by_label[canon] = elem
-                break
+        key = alias.get(nrm(txt))
+        if key and key not in found:
+            found[key] = el
 
-    # Cas spécial Bonnes raisons : si Assurance absente, Fiducie devient #1
+    # Réordonner attendu selon règle Bonnes raisons
     if section_key == 'bonnes_raisons_fr':
-        has_assurance = "Une assurance sur 100% du capital investi" in first_by_label
-        if not has_assurance:
-            expected = ["Une fiducie-sûreté sur l'actif"]
-        else:
-            expected = [
-                "Une assurance sur 100% du capital investi",
-                "Une fiducie-sûreté sur l'actif",
-            ]
+        has_assurance = "Une assurance sur 100% du capital investi" in found
+        expected = (["Une fiducie-sûreté sur l'actif"] if not has_assurance
+                    else ["Une assurance sur 100% du capital investi", "Une fiducie-sûreté sur l'actif"])
 
-    # Construire l'ordre final : seulement ce qui est trouvé, et dans l'ordre attendu
-    ordered = [lbl for lbl in expected if lbl in first_by_label]
-    # Budget : ajoute "Stress test" uniquement s'il est présent
-    if section_key == 'budget_fr' and "Stress test" in first_by_label and "Stress test" not in ordered:
-        ordered.append("Stress test")
+    # Construire la liste finale (inclure Stress test seulement s'il existe)
+    order = [t for t in expected if t in found]
+    if section_key == 'budget_fr' and "Stress test" in found and "Stress test" not in order:
+        order.append("Stress test")
 
-    def set_title(elem: Tag, new_title: str, italic_underline: bool):
-        # cible : le premier enfant "titulaire" si présent
-        target = elem.find(['strong','b','em','i','u'])
-        target = target or elem
+    def set_title(el: Tag, text: str, italic_underline: bool):
+        # Ne jamais renuméroter un item déjà dans une <li> (on laisse <ol> numéroter)
+        in_li = bool(el.name == "li" or el.find_parent("li"))
+        new_text = text if not in_li else text.split(". ", 1)[-1]  # enlever "1. " si on est dans une liste
 
-        # remplace proprement (en retirant l'ancien texte et sa numérotation)
+        # Marquer le conteneur pour bloquer la conversion <ol> en aval
+        container = el if el.name in {"p","li"} else el.find_parent(["p","li"]) or el
+        try:
+            container["data-fixed-numbering"] = "1"
+        except Exception:
+            pass
+
+        # Remplacement + style Budget (italique + souligné)
+        target = el
         if italic_underline:
-            u = soup.new_tag("u"); u.string = new_title
+            u = soup.new_tag("u"); u.string = new_text
             em = soup.new_tag("em"); em.append(u)
             target.clear(); target.append(em)
         else:
-            target.clear(); target.string = new_title
+            target.clear(); target.string = new_text
 
-    # Appliquer la numérotation et le style
-    for i, lbl in enumerate(ordered, start=1):
-        el = first_by_label[lbl]
-        new_title = f"{i}. {lbl}"
-        set_title(el, new_title, italic_underline=(section_key == 'budget_fr'))
+    for i, title in enumerate(order, 1):
+        el = found[title]
+        label = f"{i}. {title}"
+        set_title(el, label, italic_underline=(section_key == 'budget_fr'))
 
     return soup.div.decode_contents()
 
