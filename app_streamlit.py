@@ -509,30 +509,30 @@ def fix_section_numbering(html: str, section_key: str) -> str:
         order.append("Stress test")
 
     def _remove_leading_label_from_li(li: Tag, label_norm: str):
-    """Retire la 'ligne-titre' au début de la <li>, qu'elle soit dans <p>/<em>/<u>/<strong> ou texte brut."""
-    def norm(s: str) -> str:
-        s = re.sub(r'^\s*(?:[\(\[]?\d+(?:\.\d+)*[\)\.]?|[ivxlcdm]+[\)\.]|[A-Z]\)|•|–|—|-|\*)\s*', '', s or '', flags=re.I)
-        s = _strip_accents((s or "").lower()).replace("\u00A0"," ").strip()
-        s = s.replace(" d’"," d'").replace(" l’"," l'")
-        return " ".join(s.split())
-
-    # 1) si premier enfant bloc ressemble au titre, on le supprime
-    for child in list(li.children):
-        if isinstance(child, NavigableString) and not str(child).strip():
-            continue
-        if getattr(child, "name", None) in {"p","strong","b","em","i","u","span"}:
-            t = child.get_text(" ", strip=True) or ""
-            if norm(t).startswith(label_norm):
-                child.decompose()
+        """Retire la 'ligne-titre' au début de la <li>, qu'elle soit dans <p>/<em>/<u>/<strong> ou texte brut."""
+        def norm(s: str) -> str:
+            s = re.sub(r'^\s*(?:[\(\[]?\d+(?:\.\d+)*[\)\.]?|[ivxlcdm]+[\)\.]|[A-Z]\)|•|–|—|-|\*)\s*', '', s or '', flags=re.I)
+            s = _strip_accents((s or "").lower()).replace("\u00A0"," ").strip()
+            s = s.replace(" d’"," d'").replace(" l’"," l'")
+            return " ".join(s.split())
+    
+        # 1) si premier enfant bloc ressemble au titre, on le supprime
+        for child in list(li.children):
+            if isinstance(child, NavigableString) and not str(child).strip():
+                continue
+            if getattr(child, "name", None) in {"p","strong","b","em","i","u","span"}:
+                t = child.get_text(" ", strip=True) or ""
+                if norm(t).startswith(label_norm):
+                    child.decompose()
+                break
+            if isinstance(child, NavigableString):
+                t = str(child)
+                if norm(t).startswith(label_norm):
+                    # on coupe juste le début correspondant
+                    child.replace_with("")
+                break
+            # autre tag (ex: div) -> on arrête, pas de risque ici
             break
-        if isinstance(child, NavigableString):
-            t = str(child)
-            if norm(t).startswith(label_norm):
-                # on coupe juste le début correspondant
-                child.replace_with("")
-            break
-        # autre tag (ex: div) -> on arrête, pas de risque ici
-        break
 
     # Appliquer la numérotation visible (et neutraliser la numérotation auto des <ol>)
     def set_title(el: Tag, label_text: str, italic_underline: bool):
