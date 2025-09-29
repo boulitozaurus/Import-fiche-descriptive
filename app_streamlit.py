@@ -54,9 +54,14 @@ DEFAULT_HEADING_MAP = {
     "Budget de l'opération": "Budget",
     "L'opérateur": "Présentation de l'opérateur",
     "Track record et opérations en cours": "Track record",
+    "Track record en Crowdlending": "Track record",
     "Structure et Management": "Structure et Management",
     "Actionnariat et structure de l'opération": "Actionnariat",
     "Finances": "Finances",
+    # Alias pour éviter les doublons
+    "PRESENTATION DE L'OPERATION": "Présentation de l'opération",
+    "LES BONNES RAISONS D'INVESTIR": "Les bonnes raisons d'investir",
+    "PRESENTATION DE L'OPERATEUR": "Présentation de l'opérateur",
 }
 
 DEFAULT_SCHEMA = {
@@ -191,6 +196,17 @@ def split_sections_by_headings(html: str, heading_index: dict[str, str]) -> dict
         if current is not None:
             out[current] += str(el)
 
+    # NOUVELLE ÉTAPE : Fusionner les sections qui ont du contenu dupliqué
+    # Si une section principale est vide mais qu'on trouve du contenu ailleurs, on fusionne
+    for key, content in list(out.items()):
+        if content.strip():
+            # Chercher d'autres clés qui pourraient être des alias
+            for other_key in list(out.keys()):
+                if other_key != key and _norm(other_key) == _norm(key):
+                    if out[other_key].strip():
+                        out[key] += out[other_key]
+                        out[other_key] = ""
+    
     return out
 
 # ================= NETTOYAGE DES LISTES =================
@@ -462,21 +478,27 @@ def fix_section_numbering(html: str, section_key: str) -> str:
     if section_key not in EXPECTED_TITLES:
         return html
     
-    expected = EXPECTED_TITLES[section_key]
+    expected = EXPECTED_TITLES[section_key].copy()
     
     def normalize(text):
         text = text.lower().strip()
         text = re.sub(r'^\s*\d+[\.\)]\s*', '', text)
+        text = re.sub(r'^\s*[ivxlc]+[\.\)]\s*', '', text, flags=re.I)
         text = re.sub(r'^[\•\-\*]\s*', '', text)
         text = _strip_accents(text)
         return ' '.join(text.split())
     
     expected_normalized = {normalize(t): t for t in expected}
     
+    # Trouver tous les éléments potentiels (y compris les <em> pour budget)
     potential_titles = []
-    for elem in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'strong', 'b']):
+    for elem in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'strong', 'b', 'em', 'i']):
         text = elem.get_text(strip=True)
         if not text:
+            continue
+        
+        # Ignorer les éléments trop courts ou trop longs
+        if len(text) < 5 or len(text) > 150:
             continue
             
         norm_text = normalize(text)
@@ -484,6 +506,7 @@ def fix_section_numbering(html: str, section_key: str) -> str:
             potential_titles.append((elem, norm_text))
     
     if potential_titles:
+        # Cas spécial bonnes raisons : adapter si pas d'assurance
         if section_key == 'bonnes_raisons_fr':
             found_titles = [norm for _, norm in potential_titles]
             has_assurance = normalize(expected[0]) in found_titles
@@ -492,6 +515,7 @@ def fix_section_numbering(html: str, section_key: str) -> str:
                 expected = expected[1:]
                 expected_normalized = {normalize(t): t for t in expected}
         
+        # Appliquer la numérotation
         for elem, norm_text in potential_titles:
             if norm_text in expected_normalized:
                 original_title = expected_normalized[norm_text]
@@ -503,15 +527,30 @@ def fix_section_numbering(html: str, section_key: str) -> str:
                 
                 new_title = f"{num}. {original_title}"
                 
+                # Remplacer le contenu en fonction du type d'élément
                 if elem.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                    elem.clear()
                     elem.string = new_title
                 elif elem.name in ['strong', 'b']:
+                    elem.clear()
                     elem.string = new_title
+                elif elem.name in ['em', 'i']:
+                    # Pour budget : garder l'italique
+                    elem.clear()
+                    new_em = soup.new_tag('em')
+                    new_em.string = new_title
+                    elem.replace_with(new_em)
                 elif elem.name == 'p':
-                    strong_elem = elem.find(['strong', 'b'])
-                    if strong_elem and len(list(elem.children)) == 1:
-                        strong_elem.string = new_title
+                    # Vérifier s'il y a un strong/b/em à l'intérieur
+                    inner = elem.find(['strong', 'b', 'em', 'i'])
+                    if inner:
+                        inner.clear()
+                        if inner.name in ['em', 'i']:
+                            inner.string = new_title
+                        else:
+                            inner.string = new_title
                     else:
+                        elem.clear()
                         elem.string = new_title
     
     result = soup.div.decode_contents()
@@ -625,6 +664,17 @@ if uploaded is not None:
 
     st.subheader("Résultat du mapping automatique")
     st.dataframe(rows, use_container_width=True)
+    
+    # DÉBOGAGE : Afficher les sections détectées
+    with st.expander("🔍 Débogage : Sections détectées dans le HTML"):
+        st.write("**Sections avec contenu :**")
+        for k, v in sections.items():
+            if v.strip():
+                st.write(f"- **{k}** : {len(v)} caractères")
+        st.write("**Sections vides :**")
+        for k, v in sections.items():
+            if not v.strip():
+                st.write(f"- {k}")
 
     st.header("Aperçu des sections (mise en forme préservée)")
     inject_css()
