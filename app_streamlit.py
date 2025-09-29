@@ -297,6 +297,7 @@ def _fix_lists_in_soup(soup):
     while changed:
         changed = False
 
+        # Retire <p> ou <li> "puces seules" / vides
         for p in list(soup.find_all("p")):
             if _is_bullet_only_text(p.get_text(" ", strip=True)):
                 p.decompose()
@@ -308,12 +309,14 @@ def _fix_lists_in_soup(soup):
                 li.decompose()
                 changed = True
 
+        # Nettoie <p> vides directement sous <li>
         for li in list(soup.find_all("li")):
             for p in list(li.find_all("p", recursive=False)):
                 if not p.get_text(strip=True):
                     p.decompose()
                     changed = True
 
+        # Aplatis quelques cas simples (li sans texte direct + une seule sous-liste)
         for li in list(soup.find_all("li")):
             direct_text = "".join(t for t in li.find_all(string=True, recursive=False)).strip()
             child_lists = [c for c in li.contents if getattr(c, "name", None) in ("ol", "ul")]
@@ -323,27 +326,16 @@ def _fix_lists_in_soup(soup):
                 if getattr(parent, "name", None) not in ("ul", "ol"):
                     continue
 
-                if parent.name == "ul" and inner.name == "ol":
-                    siblings = parent.find_all("li", recursive=False)
-                    if len(siblings) == 1 and siblings[0] is li:
-                        parent.replace_with(inner)
-                    else:
-                        new_ol = soup.new_tag("ol")
-                        for sub_li in inner.find_all("li", recursive=False):
-                            new_ol.append(sub_li)
-                        parent.insert_before(new_ol)
-                        li.decompose()
+                if parent.name == inner.name:
+                    for sub_li in inner.find_all("li", recursive=False):
+                        li.insert_before(sub_li)
+                    li.decompose()
                     changed = True
                 else:
-                    if parent.name == inner.name:
-                        for sub_li in inner.find_all("li", recursive=False):
-                            li.insert_before(sub_li)
-                        li.decompose()
-                        changed = True
-                    else:
-                        li.replace_with(inner)
-                        changed = True
+                    li.replace_with(inner)
+                    changed = True
 
+        # Supprime <ul> sans <li> qui ne contiennent qu'une sous-liste
         for ul in list(soup.find_all("ul")):
             lis = ul.find_all("li", recursive=False)
             if len(lis) == 0:
@@ -351,20 +343,6 @@ def _fix_lists_in_soup(soup):
                 if len(only_lists) == 1:
                     ul.replace_with(only_lists[0])
                     changed = True
-
-        if _merge_split_ol_blocks(soup):
-            changed = True
-
-        if _promote_nested_ol_to_siblings(soup):
-            changed = True
-
-        for ol in list(soup.find_all("ol")):
-            nxt = ol.find_next_sibling()
-            if getattr(nxt, "name", None) == "ol":
-                for li in list(nxt.find_all("li", recursive=False)):
-                    ol.append(li)
-                nxt.decompose()
-                changed = True
 
     return soup
 
