@@ -303,14 +303,11 @@ def build_heading_index(expected_headings: list[str], word_to_pdf: dict[str, str
     idx[_norm("contexte & usage des fonds")] = "Contexte et usage des fonds"
     return idx
 
-BULLET_ONLY_RE = re.compile(r'^\s*(?:[•◦·\-–o]+)\s*$', re.I)
-
 NBSP = "\u00A0"
-# •, ◦, ●, ▪, ▫, ·, –, —, -, o  (+ NBSP)
 _BULLETS = "•◦●▪▫·–—-o" + NBSP
+_BULLET_CLASS = "".join(re.escape(ch) for ch in _BULLETS)
+BULLET_ONLY_RE = re.compile(r'^[\s' + _BULLET_CLASS + r']+$', re.I)
 
-# 1) paragraphe/élément ne contenant qu'une puce
-BULLET_ONLY_RE = re.compile(rf"^[\s{_BULLETS}]+$", re.I)
 
 def _is_bullet_only_text(text: str) -> bool:
     t = (text or "").replace(NBSP, " ").strip()
