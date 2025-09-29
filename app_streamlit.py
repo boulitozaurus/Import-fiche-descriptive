@@ -343,6 +343,20 @@ nl_key_by_key = {f["key"]: f.get("nl_key") for f in fields}
 word_to_pdf = load_heading_map()
 expected_word_headings = list(word_to_pdf.keys())
 
+# Build: Word heading -> (libellé PDF/CRM, clé CRM)
+crm_map = {}
+missing = []
+for wh, pdf_label in word_to_pdf.items():
+    k = key_by_pdf_label_norm.get(_norm(pdf_label))
+    if k:
+        crm_map[wh] = (pdf_label, k)
+    else:
+        missing.append(pdf_label)
+
+# Optionnel: remonter les libellés non résolus
+if missing:
+    st.warning("Champs non trouvés dans le schema: " + ", ".join(missing))
+        
 # Upload
 st.header("1) Charger la fiche .docx")
 uploaded = st.file_uploader("Glissez le .docx ici", type=["docx"])
@@ -396,9 +410,4 @@ if uploaded is not None:
             st.download_button(f"Télécharger {fname}", data=data, file_name=fname, mime=ctype, key=f"dl_{uid}")
     
         st.divider()
-
-    
-    clean_html = _fix_stray_data_uri(fr_payload.get(key, ""))
-    st.markdown(f"<div class='sect'>{clean_html or '<p><em>(vide)</em></p>'}</div>", unsafe_allow_html=True)
-
 
