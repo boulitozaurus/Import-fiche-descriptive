@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Dict, List
 from streamlit.components.v1 import html as st_html
 import mammoth
-from bs4 import BeautifulSoup, Tag, NavigableString
+from bs4 import BeautifulSoup, Tag, NavigableString, Comment
 import uuid
 import re
 from docx import Document
@@ -478,8 +478,11 @@ def fix_section_numbering(html: str, section_key: str) -> str:
         if li:
             ol = li.find_parent("ol")
             if ol:
-                ol["data-noautonum"] = "1"  # le CSS coupe la puce auto
-
+                ol["data-noautonum"] = "1"
+            ul = li.find_parent("ul")
+            if ul:
+                ul["data-noautonum"] = "1"
+                
         target = el
         target.clear()
         if italic_underline:
@@ -540,6 +543,8 @@ def inject_css():
       .sect ol, .sect ul { margin: .40rem 0 .60rem 1.4rem; padding-left: 1.2rem; list-style-position: outside; }
       .sect ol { list-style-type: decimal; }
       .sect ul { list-style-type: disc; }
+      .sect ul[data-noautonum="1"] { list-style: none; padding-left: 0; margin-left: 0; }
+      .sect ul[data-noautonum="1"] > li { margin-left: 0; }
       
       .sect ol[data-noautonum="1"] { list-style: none; padding-left: 0; margin-left: 0; }
       .sect ol[data-noautonum="1"] > li { margin-left: 0; }
