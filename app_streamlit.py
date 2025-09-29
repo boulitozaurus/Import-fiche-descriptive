@@ -555,7 +555,7 @@ def fix_section_numbering(html: str, section_key: str) -> str:
             em = soup.new_tag("em"); em.append(u)
             el.append(em)
         else:
-        el.string = label_text
+            el.string = label_text
 
     for i, title in enumerate(order, 1):
         el = first[title]
