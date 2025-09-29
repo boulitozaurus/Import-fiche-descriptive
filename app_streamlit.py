@@ -300,6 +300,108 @@ def prepare_section_html(html: str):
 
     return cleaned, downloads
 
+# ---------- Post-traitements spécifiques par section ----------
+
+def _tag_starts_with_any(p: Tag, labels_norm: list[str]) -> str | None:
+    """
+    Si le texte du tag commence par un des 'labels_norm' (après normalisation
+    _norm et retrait d'un '1.' éventuel), retourne le libellé normalisé trouvé.
+    Sinon None.
+    """
+    t = (p.get_text(" ", strip=True) or "")
+    t0 = _strip_leading_numbering(t)
+    n = _norm(t0)
+    for lab in labels_norm:
+        if n.startswith(lab):
+            return lab
+    return None
+
+def _wrap_whole_tag_with_em_u(p: Tag):
+    """Transforme le contenu du tag en <em><u>...</u></em> (garde l’HTML interne)."""
+    if not p.contents:
+        return
+    em = p.new_tag("em")
+    u  = p.new_tag("u")
+    p.insert(0, em)
+    em.append(u)
+    # déplacer tout le contenu existant dans <u>
+    for c in list(p.contents)[1:]:
+        u.append(c.extract())
+
+def _flatten_all_lists_to_paragraphs(soup: BeautifulSoup):
+    """
+    Finances: retire toute numérotation/puces.
+    - <li> devient <p> (on garde l'HTML interne),
+    - on supprime ensuite les <ul>/<ol> vides.
+    """
+    for li in list(soup.find_all("li")):
+        p = soup.new_tag("p")
+        for c in list(li.contents):
+            p.append(c.extract())
+        li.replace_with(p)
+
+    # nettoyer les wrappers <ul>/<ol> désormais vides
+    for lst in list(soup.find_all(["ul", "ol"])):
+        if not lst.find(["li"]):
+            lst.unwrap()
+
+def _postprocess_budget(html: str) -> str:
+    """
+    BUDGET — règles fixes (titres en italique + soulignés).
+    On NE restructure pas: on repère des lignes qui commencent
+    par l’un des libellés attendus et on applique <em><u>...</u></em>.
+    """
+    BUDGET_LABELS = [
+        "Prix de revient",
+        "Financement et ratios",
+        "Revenus et marges",
+        "Couverture des intérêts",
+        "Stress test",
+    ]
+    labels_norm = [_norm(x) for x in BUDGET_LABELS]
+
+    soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
+
+    for tag in soup.find_all(["p", "li", "h4", "h5", "h6"]):
+        hit = _tag_starts_with_any(tag, labels_norm)
+        if not hit:
+            continue
+        # heuristique: on applique le style si c'est bien une "ligne de titre"
+        raw = tag.get_text(" ", strip=True)
+        if len(raw) <= 120:  # un titre tient sur une ligne raisonnable
+            _wrap_whole_tag_with_em_u(tag)
+
+    return soup.div.decode_contents()
+
+def _postprocess_finances(html: str) -> str:
+    """
+    FINANCES — aucune numérotation/puces: on aplatit toutes les listes.
+    """
+    soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
+    _flatten_all_lists_to_paragraphs(soup)
+    return soup.div.decode_contents()
+
+def postprocess_domain_section(label: str, html: str) -> str:
+    """
+    Sélecteur de post-traitements selon l’intitulé PDF/CRM.
+    - Facteurs de risque / Bonnes raisons : on laisse les correctifs génériques.
+      (Si tu veux, je peux t’ajouter un bloc ici pour forcer 1/2/3 et 1/2 comme
+       on en a parlé – je le garde prêt en commentaire ci-dessous.)
+    - Budget : applique titres italique + souligné.
+    - Finances : enlève toute numérotation/puces.
+    """
+    lab_n = _norm(label)
+    if "budget" in lab_n:
+        return _postprocess_budget(html)
+    if "finance" in lab_n:
+        return _postprocess_finances(html)
+    return html
+
+### --- (Option : gabarits prêts pour un forçage strict des listes)
+### def _enforce_fixed_risks(soup: BeautifulSoup): ...
+### def _enforce_fixed_bonnes_raisons(soup: BeautifulSoup): ...
+### -> Si tu veux les activer, on branchera ici, exactement comme pour Budget/Finances.
+
 def _strip_leading_numbering(s: str) -> str:
     """Supprime une numérotation de début de ligne: '1.2. ', 'I. ', 'A) ', '• ', '-', '– ' ..."""
     return re.sub(r'^\s*(?:[\(\[]?\d+(?:\.\d+)*[\)\.]?|[ivxlcdm]+[\)\.]|[A-Z]\)|•|–|-)\s*', '', s or '', flags=re.I)
@@ -771,9 +873,11 @@ if uploaded is not None:
     
         raw_html = fr_payload.get(key, "")
         clean_html, dls = prepare_section_html(raw_html)
-    
+        clean_html = postprocess_domain_section(label, clean_html)
+        
         st.subheader(label)
-        st.markdown(f"<div class='sect'>{clean_html or '<p><em>(vide)</em></p>'}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='sect'>{clean_html or '<p><em>(vide)</em></p>'}</div>",
+            unsafe_allow_html=True)
     
         # Boutons de téléchargement, localisés à la section
         for uid, fname, data, ctype in dls:
