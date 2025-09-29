@@ -54,6 +54,7 @@ DEFAULT_HEADING_MAP = {
     "Marché et références": "Marché et références",
     "Budget de l'opération": "Budget",
     "L'opérateur": "Présentation de l'opérateur",
+    "Track record et opérations en cours": "Track record",
     "Structure et Management": "Structure et Management",
     "Actionnariat et structure de l'opération": "Actionnariat",
     "Finances": "Finances",
@@ -226,6 +227,8 @@ def split_sections_by_headings(html: str, heading_index: dict[str, str]) -> dict
 
     soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
     out = {v: "" for v in set(heading_index.values())}
+    allowed_keys = set(out.keys())  # <-- AJOUT: seules ces clés sont autorisées
+
     current = None
     unmapped = []
 
@@ -235,19 +238,22 @@ def split_sections_by_headings(html: str, heading_index: dict[str, str]) -> dict
     def best_match(n: str) -> str | None:
         # 1) direct
         if n in heading_index:
-            return heading_index[n]
+            wh = heading_index[n]
+            return wh if wh in allowed_keys else None  # <-- AJOUT: filtrer
         # 2) variantes simples (retirer - et ' pour rattraper)
         n2 = re.sub(r"[-']", " ", n)
         if n2 in heading_index:
-            return heading_index[n2]
+            wh = heading_index[n2]
+            return wh if wh in allowed_keys else None  # <-- AJOUT: filtrer
         # 3) mots-clés (secours)
         for kw, wh in KEYWORD_TO_WH.items():
-            if kw in n:
+            if kw in n and wh in allowed_keys:       # <-- AJOUT: filtrer
                 return wh
-        # 4) fuzzy (tolérance faible pour éviter les erreurs)
+        # 4) fuzzy
         close = difflib.get_close_matches(n, known_norms, n=1, cutoff=0.86)
         if close:
-            return heading_index[close[0]]
+            wh = heading_index[close[0]]
+            return wh if wh in allowed_keys else None
         return None
 
     for el in soup.div.children:
@@ -268,20 +274,18 @@ def split_sections_by_headings(html: str, heading_index: dict[str, str]) -> dict
                     key = best_match(norm_text)
 
         if key:
-            # Nouveau titre reconnu -> on change de section courante
             current = key
             continue
 
-        # Coupe l'accumulation si c'est probablement un titre non mappé (évite les fuites)
+        # Coupe l'accumulation si c'est probablement un titre non mappé
         if name in {"h1","h2","h3","h4","h5","h6","p"} and _is_section_heading_p(el) and not key:
             unmapped.append(text)
             current = None
             continue
 
-        if current is not None:
+        if current in out:  # <-- CHANGEMENT: on vérifie l'existence
             out[current] += str(el)
 
-    # (option) exposer en débogage ce qui n'a pas matché
     try:
         st.session_state["unmapped_headings"] = unmapped
     except Exception:
