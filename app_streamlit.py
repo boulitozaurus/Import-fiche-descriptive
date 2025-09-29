@@ -193,7 +193,7 @@ def _autolink_html(s: str) -> str:
                   r'<a href="\1" target="_blank" rel="noopener noreferrer">\1</a>', 
                   s)
 
-def _image_handler(image: mammoth.images.Image) -> dict:
+def _image_handler(image) -> dict:
     """Mammoth: renvoie un dict avec 'src' (data URI). EMF/WMF => on stocke pour download."""
     data = image.read()
     ctype = image.content_type or "application/octet-stream"
@@ -337,17 +337,15 @@ if uploaded is not None:
         })
 
     st.subheader("Résultat du mapping automatique")
-    st.dataframe(rows)
+    st.dataframe(rows, use_container_width=True)
+            # 3) Affichage vertical fidèle (HTML)
 
-    # 3) Affichage vertical fidèle (HTML)
-st.header("Aperçu des sections (mise en forme préservée)")
-inject_css()
-
-for fdef in fields:
-    key = fdef["key"]; label = fdef["label"]
-    html_content = fr_payload.get(key, "")
-    st.subheader(label)
-    st.markdown(f"<div class='sect'>{html_content or '<p><em>(vide)</em></p>'}</div>", unsafe_allow_html=True)
-    st.divider()
-
-
+        st.header("Aperçu des sections (mise en forme préservée)")
+        inject_css()
+        
+        for fdef in fields:
+            key = fdef["key"]; label = fdef["label"]
+            html_content = fr_payload.get(key, "")
+            st.subheader(label)
+            st.markdown(f"<div class='sect'>{html_content or '<p><em>(vide)</em></p>'}</div>", unsafe_allow_html=True)
+            st.divider()
