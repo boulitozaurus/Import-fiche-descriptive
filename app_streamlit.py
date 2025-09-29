@@ -194,27 +194,50 @@ def _autolink_html(s: str) -> str:
                   s)
 
 def _image_handler(image) -> dict:
-    """Mammoth: renvoie un dict avec 'src' (data URI). EMF/WMF => on stocke pour download."""
-    data = image.read()
-    ctype = image.content_type or "application/octet-stream"
+    """
+    Callback pour mammoth.images.inline(...)
+    - Ouvre les octets via image.open()
+    - Inline en base64 pour PNG/JPEG/...
+    - Range EMF/WMF (non supportés par les navigateurs) pour download
+    """
+    # 1) Récupère le content-type déclaré par Mammoth
+    ctype = (getattr(image, "content_type", None) or "application/octet-stream").lower()
 
-    # EMF/WMF/unknown: pas affichables par le navigateur
-    if ctype in ("image/x-emf", "image/x-wmf", "application/octet-stream"):
-        fname = f"{uuid.uuid4().hex}.emf" if "emf" in ctype or ctype == "application/octet-stream" else f"{uuid.uuid4().hex}.wmf"
+    # 2) Lis les octets via image.open()
+    try:
+        with image.open() as f:           # <-- la bonne API Mammoth
+            data = f.read()
+    except Exception:
+        # Fallback parano si jamais open() échoue
+        data = b""
+
+    # 3) EMF/WMF -> pas affichable en <img>: propose un download
+    if ctype in ("image/x-emf", "image/emf", "image/x-wmf", "image/wmf", "application/octet-stream"):
+        import uuid, base64, streamlit as st
+        fname = f"{uuid.uuid4().hex}.{('emf' if 'emf' in ctype else 'wmf') if ('emf' in ctype or 'wmf' in ctype) else 'bin'}"
+        if "unsupported_images" not in st.session_state:
+            st.session_state["unsupported_images"] = []
         st.session_state["unsupported_images"].append((fname, data, ctype))
-        # petit transparent 1x1 en attendant + alt explicite
-        return {"src": "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
-                "alt": "Image non affichable (format EMF/WMF). Téléchargement dispo plus bas."}
+        # pixel transparent + alt explicite
+        return {
+            "src": "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
+            "alt": "Image non affichable (EMF/WMF). Téléchargement disponible plus bas."
+        }
 
-    # images “classiques” => inline en base64
+    # 4) Formats web affichables -> inline en base64
+    import base64
     b64 = base64.b64encode(data).decode("ascii")
     return {"src": f"data:{ctype};base64,{b64}"}
 
+
 def docx_to_html(path: str) -> str:
-    """Convertit le .docx en HTML avec mise en forme/puces/numérotation correcte."""
+    """Convertit le .docx en HTML avec Mammoth en utilisant notre handler d’images."""
     with open(path, "rb") as f:
-        result = mammoth.convert_to_html(f, convert_image=mammoth.images.inline(_image_handler))
-    return result.value  # HTML (sans <html>/<body>), c’est normal
+        result = mammoth.convert_to_html(
+            f,
+            convert_image=mammoth.images.inline(_image_handler)  # <-- garde bien inline()
+        )
+    return result.value
 
 # ---------------- Load schema + fixed heading map ----------------
 
@@ -349,3 +372,9 @@ if uploaded is not None:
         st.subheader(label)
         st.markdown(f"<div class='sect'>{html_content or '<p><em>(vide)</em></p>'}</div>", unsafe_allow_html=True)
         st.divider()
+
+    if st.session_state["unsupported_images"]:
+        st.info("Certaines images (EMF/WMF) ne peuvent pas s’afficher dans le navigateur. Télécharge-les :")
+        for i, (fname, data, ctype) in enumerate(st.session_state["unsupported_images"], 1):
+            st.download_button(f"Télécharger {fname}", data=data, file_name=fname, mime=ctype, key=f"dl_{i}")
+
