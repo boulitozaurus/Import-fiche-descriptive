@@ -552,8 +552,9 @@ def fix_section_numbering(html: str, section_key: str) -> str:
                 li.insert_before(p)
     
             # Supprimer le fragment titre d'origine
+            container = el.find_parent("p") if el else None
             try:
-                el.decompose()
+                (container or el).decompose()
             except Exception:
                 pass
     
