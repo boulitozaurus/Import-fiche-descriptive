@@ -344,17 +344,54 @@ def _fix_lists_in_soup(soup):
                     p.decompose()
                     changed = True
 
-        # 4) Aplatir ul>li>ol / ul>li>ul (li sans texte utile)
+        # 4) Aplatir correctement ul>li>ol / ul>li>ul (li sans texte utile)
         for li in list(soup.find_all("li")):
-            # Texte "utile" dans le li hors contenu des sous-listes
-            txt = "".join(t for t in li.find_all(string=True, recursive=False)).strip()
+            # Texte "utile" directement dans le <li> (hors sous-listes)
+            direct_text = "".join(t for t in li.find_all(string=True, recursive=False)).strip()
             child_lists = [c for c in li.contents if getattr(c, "name", None) in ("ol", "ul")]
-            if not txt and len(child_lists) == 1:
-                inner = child_lists[0]
-                for sub_li in inner.find_all("li", recursive=False):
-                    li.insert_before(sub_li)
-                li.decompose()
-                changed = True
+
+            if direct_text == "" and len(child_lists) == 1:
+                inner = child_lists[0]              # la vraie liste
+                parent = li.parent                  # ul/ol parent du li
+                if getattr(parent, "name", None) not in ("ul", "ol"):
+                    continue
+
+                # Cas classique: <ul><li><ol>…</ol></li></ul>  -> on remplace le wrapper par l'inner
+                if parent.name == "ul" and inner.name == "ol":
+                    siblings = parent.find_all("li", recursive=False)
+                    if len(siblings) == 1 and siblings[0] is li:
+                        # Le <ul> ne sert vraiment à rien -> on le remplace par l'<ol>
+                        parent.replace_with(inner)
+                    else:
+                        # Plus rare : plusieurs <li> existants. On insère un nouvel <ol> avant et on y déplace les items.
+                        new_ol = soup.new_tag("ol")
+                        for sub_li in inner.find_all("li", recursive=False):
+                            new_ol.append(sub_li)
+                        parent.insert_before(new_ol)
+                        li.decompose()
+                    changed = True
+                else:
+                    # Même nature (ul>li>ul ou ol>li>ol) -> on fusionne: on remonte les items dans le parent
+                    if parent.name == inner.name:
+                        for sub_li in inner.find_all("li", recursive=False):
+                            li.insert_before(sub_li)
+                        li.decompose()
+                        changed = True
+                    else:
+                        # ol>li>ul ou ul>li>ol où on ne veut pas casser la hiérarchie :
+                        # on remplace simplement le <li> par la sous-liste (elle devient sœur dans le parent).
+                        li.replace_with(inner)
+                        changed = True
+
+        # 4-bis) Si un <ul> se retrouve sans <li> (ex. après remplacement), le remplacer par sa seule sous-liste
+        for ul in list(soup.find_all("ul")):
+            lis = ul.find_all("li", recursive=False)
+            if len(lis) == 0:
+                only_lists = [c for c in ul.contents if getattr(c, "name", None) in ("ol", "ul")]
+                if len(only_lists) == 1:
+                    ul.replace_with(only_lists[0])
+                    changed = True
+
 
         # 5) Fusionner <ol> consécutifs pour éviter 1., puis 1. …
         for ol in list(soup.find_all("ol")):
