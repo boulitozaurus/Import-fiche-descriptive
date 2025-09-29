@@ -334,6 +334,48 @@ def _is_bullet_only_text(text: str) -> bool:
     t = (text or "").replace(NBSP, " ").strip()
     return bool(BULLET_ONLY_RE.match(t))
 
+def _merge_split_ol_blocks(soup: BeautifulSoup) -> bool:
+    """
+    Recoller des listes numérotées coupées par des <p> :
+    <ol>…</ol><p>…</p><p>…</p><ol>…</ol>
+    - rattache les <p> intermédiaires au dernier <li> du 1er <ol>
+    - fusionne les <li> du 2e <ol> dans le 1er
+    """
+    changed = False
+    for ol in list(soup.find_all("ol")):
+        sib = ol.find_next_sibling()
+        if sib is None:
+            continue
+
+        # collecter les <p> intercalés (en évitant les vrais titres de section)
+        trail = []
+        cur = sib
+        while cur is not None and getattr(cur, "name", None) == "p" and not _is_section_heading_p(cur):
+            trail.append(cur)
+            cur = cur.find_next_sibling()
+
+        # si derrière ces <p> on retombe sur un autre <ol> → fusion
+        if cur is not None and getattr(cur, "name", None) == "ol":
+            lis = ol.find_all("li", recursive=False)
+            last_li = lis[-1] if lis else None
+
+            # rattacher les <p> au dernier <li> (ou créer un <li> si besoin)
+            if trail:
+                if last_li is None:
+                    last_li = soup.new_tag("li")
+                    ol.append(last_li)
+                for p in trail:
+                    last_li.append(p.extract())
+
+            # déplacer les <li> du second <ol> dans le premier
+            for li in list(cur.find_all("li", recursive=False)):
+                ol.append(li.extract())
+
+            cur.decompose()
+            changed = True
+
+    return changed
+        
 def _fix_lists_in_soup(soup):
     """
     - Supprime les paragraphes & <li> 'puces fantômes' (•, o, – tout seul).
@@ -413,55 +455,11 @@ def _fix_lists_in_soup(soup):
                     ul.replace_with(only_lists[0])
                     changed = True
 
-        # 4-ter) Fusionner les listes <ol> séparées par quelques <p> (pour éviter 1. puis 1.)
+        # 4-ter) recoller les listes numérotées séparées par des <p>
         if _merge_split_ol_blocks(soup):
             changed = True
-            continue
 
-        def _merge_split_ol_blocks(soup: BeautifulSoup) -> bool:
-            """
-            Si l'on trouve : <ol> ... </ol> <p>...</p> <ol>...</ol>
-            - rattache les <p> intermédiaires au dernier <li> du premier <ol>
-            - fusionne les items du second <ol> dans le premier
-            """
-            changed = False
-        
-            # on parcourt tous les <ol> top-level
-            for ol in list(soup.find_all("ol")):
-                sib = ol.find_next_sibling()
-                if sib is None:
-                    continue
-        
-                # on collecte des <p> intermédiaires "non-titres"
-                trail = []
-                cur = sib
-                while cur is not None and cur.name == "p" and not _is_section_heading_p(cur):
-                    trail.append(cur)
-                    cur = cur.find_next_sibling()
-        
-                # si derrière ces <p> on retombe sur un autre <ol> → fusion
-                if cur is not None and cur.name == "ol":
-                    last_li = None
-                    lis = ol.find_all("li", recursive=False)
-                    if lis:
-                        last_li = lis[-1]
-        
-                    # rattacher les <p> à la fin du dernier <li> du premier <ol>
-                    if last_li:
-                        for p in trail:
-                            last_li.append(p.extract())
-        
-                    # déplacer les <li> du second <ol> dans le premier
-                    for li in list(cur.find_all("li", recursive=False)):
-                        ol.append(li.extract())
-        
-                    # supprimer le second <ol>
-                    cur.decompose()
-                    changed = True
-        
-            return changed
-
-        # 5) Fusionner <ol> consécutifs pour éviter 1., puis 1. …
+        # 5) Fusionner <ol> consécutifs pour éviter 1. puis 1. …
         for ol in list(soup.find_all("ol")):
             nxt = ol.find_next_sibling()
             if getattr(nxt, "name", None) == "ol":
