@@ -387,9 +387,9 @@ def prepare_section_html(html: str):
         if len(p.contents) == 1 and getattr(p.contents[0], "name", None) in ("strong", "b"):
             p.contents[0].unwrap()
 
-    _convert_numbered_paragraphs_to_ol(soup)
-    for cont in soup.find_all(["div", "section"]):
-        _convert_numbered_paragraphs_to_ol(cont)
+    #_convert_numbered_paragraphs_to_ol(soup)
+    #for cont in soup.find_all(["div", "section"]):
+        #_convert_numbered_paragraphs_to_ol(cont)
 
     _fix_lists_in_soup(soup)
 
@@ -500,10 +500,6 @@ def apply_fixed_numbering(fr_payload: dict) -> dict:
             result[key] = fix_section_numbering(result[key], key)
     
     return result
-
-sections_html["Facteurs de risque"]        = fix_section_numbering(sections_html.get("Facteurs de risque",""), 'points_attention_fr')
-sections_html["Les bonnes raisons d'investir"] = fix_section_numbering(sections_html.get("Les bonnes raisons d'investir",""), 'bonnes_raisons_fr')
-sections_html["Budget de l'opération"]     = fix_section_numbering(sections_html.get("Budget de l'opération",""), 'budget_fr')
 
 # ================= CHARGEMENT DE LA CONFIGURATION =================
 
