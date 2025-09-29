@@ -184,18 +184,24 @@ def _image_handler(image) -> dict:
         data = b""
 
     if ctype in ("image/x-emf", "image/emf", "image/x-wmf", "image/wmf", "application/octet-stream"):
+        import uuid, base64
         uid = uuid.uuid4().hex
         fname = f"{uid}.{'emf' if 'emf' in ctype else ('wmf' if 'wmf' in ctype else 'bin')}"
-        st.session_state.setdefault("img_store", {})[uid] = (fname, data, ctype)
+        if "img_store" not in st.session_state:
+            st.session_state["img_store"] = {}
+        st.session_state["img_store"][uid] = (fname, data, ctype)
+
+        # pixel transparent + marqueurs pour qu’on sache générer un bouton plus tard
         return {
             "src": "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
-            "alt": "",
+            "alt": "Image non affichable (EMF/WMF).",
             "data-unsupported": "1",
             "data-uid": uid,
         }
 
+    import base64
     b64 = base64.b64encode(data).decode("ascii")
-    return {"src": f"data:{ctype};base64,{b64}", "alt": ""}
+    return {"src": f"data:{ctype};base64,{b64}"}
 
 # ================= CONVERSION DOCX -> HTML =================
 
@@ -369,6 +375,15 @@ def prepare_section_html(html: str):
     #for cont in soup.find_all(["div", "section"]):
         #_convert_numbered_paragraphs_to_ol(cont)
 
+    # récupérer les EMF/WMF stockées durant la conversion
+    for img in list(soup.find_all("img")):
+        if img.get("data-unsupported") == "1":
+            uid = img.get("data-uid")
+            if uid and "img_store" in st.session_state and uid in st.session_state["img_store"]:
+                fname, data, ctype = st.session_state["img_store"][uid]
+                downloads.append((uid, fname, data, ctype))
+            img.decompose()  # on retire l’img fantôme du HTML
+            
     _fix_lists_in_soup(soup)
 
     cleaned = soup.div.decode_contents()
