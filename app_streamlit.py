@@ -78,6 +78,28 @@ DEFAULT_SCHEMA = {
     ]
 }
 
+# Reconnaissance par mots-clés (secours si le titre exact n'est pas trouvé)
+KEYWORD_TO_WH = {
+    "points d attention": "Facteurs de risque",
+    "facteurs de risque": "Facteurs de risque",
+    "bonnes raisons": "Les bonnes raisons d'investir",
+    "presentation de l operation": "Présentation de l'opération",
+    "projet": "Projet",
+    "localisation": "Localisation",
+    "planning": "Administratif et timing",
+    "marche": "Marché et références",
+    "references": "Marché et références",
+    "budget": "Budget de l'opération",
+    "operateur": "L'opérateur",
+    "track record": "Track record et opérations en cours",
+    "structure": "Structure et Management",
+    "management": "Structure et Management",
+    "actionnariat": "Actionnariat et structure de l'opération",
+    "finances": "Finances",
+    "contexte": "Contexte et usage des fonds",
+    "description": "Introduction",
+}
+
 # ================= FONCTIONS UTILITAIRES =================
 
 def _strip_accents(x: str) -> str:
