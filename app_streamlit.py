@@ -1,25 +1,11 @@
-import os
-import io
-import csv
-import json
-import yaml
-import requests
 import streamlit as st
 from pathlib import Path
 from typing import Dict, List
-from streamlit.components.v1 import html as st_html
 import mammoth
 from bs4 import BeautifulSoup, Tag, NavigableString
 import uuid
 import re
-# ---------------- Utils: headings + parsing ----------------
-from docx import Document
-from docx.table import _Cell, Table
-from docx.text.paragraph import Paragraph
-from docx.oxml.table import CT_Tbl
-from docx.oxml.text.paragraph import CT_P
 import base64, re
-from docx.text.run import Run
 from docx.oxml.ns import qn
 
 HEADING_STYLES = {"Heading 1","Heading 2","Heading 3","Titre 1","Titre 2","Titre 3","Title","Subtitle"}
@@ -48,10 +34,6 @@ def _is_section_heading_p(p: Tag) -> bool:
     if len(txt) <= 90 and (p.find(["strong", "b"]) or _HEADING_RE.match(txt)):
         return True
     return False
-
-def _data_uri(image):
-    data = base64.b64encode(image.read()).decode("ascii")
-    return {"src": f"data:{image.content_type};base64,{data}"}
 
 def split_sections_by_headings(html: str, heading_index: dict[str, str]) -> dict[str, str]:
     # normalise : retire numérotation + ":" final, supprime accents / casse / espaces
@@ -91,20 +73,6 @@ def _strip_accents(x: str) -> str:
 def _norm(s: str) -> str:
     return " ".join(_strip_accents((s or "")).lower().replace("’","'").split())
 
-def _is_heading_style(p: Paragraph) -> bool:
-    s = p.style.name if getattr(p, "style", None) else ""
-    return (s in HEADING_STYLES) or s.startswith("Heading")
-
-def _looks_like_heading(text: str, p: Paragraph, expected_map: dict) -> bool:
-    t = (text or "").strip()
-    if not t: return False
-    if _norm(t) in expected_map or _norm(t.rstrip(":")) in expected_map:
-        return True
-    if _is_heading_style(p):
-        if len(t) <= 80 and t.count(" ") <= 11 and all(x not in t for x in [".","!","?"]):
-            return True
-    return False
-
 def _html_escape(s: str) -> str:
     return (s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
@@ -120,106 +88,6 @@ def _wrap_styles(run, txt: str) -> str:
     if getattr(run, "bold", False):
         open_tags += "<strong>"; close_tags = "</strong>" + close_tags
     return f"{open_tags}{txt}{close_tags}"
-
-def _run_image_payload(run):
-    """Retourne un dict:
-       {"kind":"img","src":data_uri}  ou
-       {"kind":"download","mime":mime,"href":data_uri_download}  pour EMF/WMF."""
-    try:
-        def find_rid(el):
-            for child in el.iterchildren():
-                tag = child.tag
-                if tag.endswith("}blip"):
-                    rid = child.get(qn("r:embed"))
-                    if rid: return rid
-                if tag.endswith("}imagedata"):
-                    rid = child.get(qn("r:id"))
-                    if rid: return rid
-                rid = find_rid(child)
-                if rid: return rid
-            return None
-
-        rId = find_rid(run._r)
-        if not rId:
-            return None
-        part = run.part.related_parts.get(rId)
-        if not part:
-            return None
-        mime = (getattr(part, "content_type", "application/octet-stream") or "").lower()
-        b64  = base64.b64encode(part.blob).decode("ascii")
-        # Formats d'image supportés nativement par le navigateur
-        ok = {"image/png","image/jpeg","image/jpg","image/gif","image/webp","image/svg+xml","image/bmp","image/tiff"}
-        if mime in ok:
-            return {"kind":"img","src": f"data:{mime};base64,{b64}"}
-        # EMF/WMF -> non supporté : proposer un téléchargement propre
-        if "emf" in mime or "wmf" in mime:
-            return {"kind":"download","mime": mime, "href": f"data:application/octet-stream;base64,{b64}"}
-        # sinon on tente quand même
-        return {"kind":"img","src": f"data:{mime};base64,{b64}"}
-    except Exception:
-        return None
-
-def _run_to_html(run) -> str:
-    payload = _run_image_payload(run)
-    if payload:
-        if payload["kind"] == "img":
-            return f'<img src="{payload["src"]}" />'
-        else:
-            ext = payload["mime"].split("/")[-1]
-            return (f'<span class="img-unsupported">[image {ext.upper()} non supportée] '
-                    f'<a href="{payload["href"]}" download="image.{ext}">Télécharger</a></span>')
-    # sinon texte & sauts de ligne
-    frags = []
-    for child in run._r.iterchildren():
-        if child.tag.endswith("}t"):
-            txt = _html_escape(child.text or "")
-            if txt: frags.append(_wrap_styles(run, txt))
-        elif child.tag.endswith("}br"):
-            frags.append("<br/>")
-    if not frags:
-        txt = _html_escape(run.text or "")
-        if txt: frags.append(_wrap_styles(run, txt))
-    return "".join(frags)
-
-def _hyperlink_map(p: Paragraph) -> dict:
-    """Associe chaque run XML à son URL (<w:hyperlink> et <w:fldSimple instr='HYPERLINK ...'>)."""
-    m = {}
-    try:
-        for el in p._p.iterchildren():
-            tag = el.tag
-            # Cas 1 : <w:hyperlink r:id="...">...</w:hyperlink>
-            if tag.endswith("}hyperlink"):
-                r_id = el.get(qn("r:id"))
-                url = None
-                if r_id:
-                    rel = p.part.rels.get(r_id)
-                    if rel is not None:
-                        url = getattr(rel, "target_ref", None) or getattr(rel, "target_part", None)
-                        if hasattr(url, "partname"):
-                            url = str(url.partname)
-                for r in el.iterchildren():
-                    if r.tag.endswith("}r"):
-                        m[r] = url
-            # Cas 2 : <w:fldSimple w:instr="HYPERLINK \"https://...\"">...</w:fldSimple>
-            elif tag.endswith("}fldSimple"):
-                instr = el.get(qn("w:instr")) or ""
-                m_url = re.search(r'HYPERLINK\s+"([^"]+)"', instr, flags=re.I) or re.search(r'HYPERLINK\s+(\S+)', instr, flags=re.I)
-                if m_url:
-                    url = m_url.group(1)
-                    for r in el.iterchildren():
-                        if r.tag.endswith("}r"):
-                            m[r] = url
-    except Exception:
-        pass
-    return m
-
-def _autolink_html(s: str) -> str:
-    # transforme http(s)://... en lien si aucune balise <a ...> n'est déjà présente
-    if "<a " in s: 
-        return s
-    return re.sub(r'(?<!["\'>])(https?://[^\s<]+)', 
-                  r'<a href="\1" target="_blank" rel="noopener noreferrer">\1</a>', 
-                  s)
 
 def _image_handler(image) -> dict:
     ctype = (getattr(image, "content_type", None) or "application/octet-stream").lower()
@@ -317,10 +185,10 @@ def _tag_starts_with_any(p: Tag, labels_norm: list[str]) -> str | None:
     return None
 
 def _wrap_whole_tag_with_em_u(tag: Tag):
-    """Transforme *tout le contenu* du tag en <em><u>...</u></em> (à l'intérieur du tag)."""
-    if not isinstance(tag, Tag):
+    """Transforme tout le contenu du tag en <em><u>...</u></em>."""
+    from bs4 import Tag as _Tag
+    if not isinstance(tag, _Tag) or not hasattr(tag, "new_tag"):
         return
-    # garder le contenu existant
     children = list(tag.contents)
     tag.clear()
     em = tag.new_tag("em")
@@ -382,10 +250,6 @@ def _postprocess_finances(html: str) -> str:
     soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
     _flatten_all_lists_to_paragraphs(soup)
     return soup.div.decode_contents()
-
-def _strip_leading_numbering(txt: str) -> str:
-    # ex. "1. Titre", "1) Titre", "- Titre" -> "Titre"
-    return re.sub(r"^\s*[\d\-\.\)\(]+\s*", "", txt or "").strip()
 
 def _iterate_top_blocks(container: Tag):
     """
