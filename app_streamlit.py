@@ -263,6 +263,11 @@ def prepare_section_html(html: str):
                 downloads.append((uid, fname, data, ctype))
             img.decompose()
 
+    # Unwrap des paragraphes entièrement en <strong>/<b> (Word "Caractères forts")
+    for p in list(soup.find_all("p")):
+        if len(p.contents) == 1 and getattr(p.contents[0], "name", None) in ("strong", "b"):
+            p.contents[0].unwrap()
+
     # (c) corriger les listes fantômes
     _fix_lists_in_soup(soup)
 
@@ -300,25 +305,68 @@ def build_heading_index(expected_headings: list[str], word_to_pdf: dict[str, str
 
 BULLET_ONLY_RE = re.compile(r'^\s*(?:[•◦·\-–o]+)\s*$', re.I)
 
+NBSP = "\u00A0"
+# •, ◦, ●, ▪, ▫, ·, –, —, -, o  (+ NBSP)
+_BULLETS = "•◦●▪▫·–—-o" + NBSP
+
+# 1) paragraphe/élément ne contenant qu'une puce
+BULLET_ONLY_RE = re.compile(rf"^[\s{_BULLETS}]+$", re.I)
+
+def _is_bullet_only_text(text: str) -> bool:
+    t = (text or "").replace(NBSP, " ").strip()
+    return bool(BULLET_ONLY_RE.match(t))
+
 def _fix_lists_in_soup(soup):
     """
-    - Enlève les paragraphes 'puce fantôme' (ne contenant qu'un symbole de puce)
-    - Aplati ul>li>ol (puce vide qui enveloppe une vraie liste numérotée)
+    - Supprime les paragraphes & <li> 'puces fantômes' (•, o, – tout seul).
+    - Supprime les <p> vides au niveau des <li>.
+    - Aplati les structures du type <ul><li><ol>…</ol></li></ul>.
+    - Fusionne les listes numérotées adjacentes si besoin.
     """
-    # 1) Supprimer les <p> qui ne contiennent qu'un symbole de puce
-    for p in list(soup.find_all("p")):
-        if BULLET_ONLY_RE.match(p.get_text(" ", strip=True)):
-            p.decompose()
+    changed = True
+    while changed:
+        changed = False
 
-    # 2) Aplatir ul>li>ol / ul>li>ul fantômes
-    for li in list(soup.find_all("li")):
-        # on ne garde que les nœuds élémentaires
-        children = [c for c in li.children if getattr(c, "name", None)]
-        if len(children) == 1 and children[0].name in ("ol", "ul") and not li.get_text(strip=True):
-            inner_list = children[0]
-            for sub_li in inner_list.find_all("li", recursive=False):
-                li.insert_before(sub_li)
-            li.decompose()
+        # 1) Enlever <p> ne contenant qu'une puce
+        for p in list(soup.find_all("p")):
+            if _is_bullet_only_text(p.get_text(" ", strip=True)):
+                p.decompose()
+                changed = True
+
+        # 2) Purger <li> vides / 'puce' seule
+        for li in list(soup.find_all("li")):
+            txt = li.get_text(" ", strip=True)
+            if not txt or _is_bullet_only_text(txt):
+                li.decompose()
+                changed = True
+
+        # 3) Enlever <p> vides directement sous <li>
+        for li in list(soup.find_all("li")):
+            for p in list(li.find_all("p", recursive=False)):
+                if not p.get_text(strip=True):
+                    p.decompose()
+                    changed = True
+
+        # 4) Aplatir ul>li>ol / ul>li>ul (li sans texte utile)
+        for li in list(soup.find_all("li")):
+            # Texte "utile" dans le li hors contenu des sous-listes
+            txt = "".join(t for t in li.find_all(string=True, recursive=False)).strip()
+            child_lists = [c for c in li.contents if getattr(c, "name", None) in ("ol", "ul")]
+            if not txt and len(child_lists) == 1:
+                inner = child_lists[0]
+                for sub_li in inner.find_all("li", recursive=False):
+                    li.insert_before(sub_li)
+                li.decompose()
+                changed = True
+
+        # 5) Fusionner <ol> consécutifs pour éviter 1., puis 1. …
+        for ol in list(soup.find_all("ol")):
+            nxt = ol.find_next_sibling()
+            if getattr(nxt, "name", None) == "ol":
+                for li in list(nxt.find_all("li", recursive=False)):
+                    ol.append(li)
+                nxt.decompose()
+                changed = True
 
     return soup
 
@@ -379,8 +427,6 @@ def load_heading_map() -> Dict[str, str]:
 def inject_css():
     st.markdown("""
     <style>
-      /* Titres rendus par Streamlit (st.subheader) => OK */
-      /* Contenu des sections (.sect) : normaliser l'apparence des h1..h6 hérités du Word */
       .sect h1, .sect h2, .sect h3 {
         font-size: 1.15rem;
         line-height: 1.5;
@@ -394,13 +440,7 @@ def inject_css():
         margin: .30rem 0 .30rem;
       }
       .sect p { margin: .30rem 0; }
-
-      /* Listes : marge, retrait et style lisible */
-      .sect ol, .sect ul {
-        margin: .40rem 0 .60rem 1.4rem;
-        padding-left: 1.2rem;
-        list-style-position: outside;
-      }
+      .sect ol, .sect ul { margin: .40rem 0 .60rem 1.4rem; padding-left: 1.2rem; list-style-position: outside; }
       .sect ol { list-style-type: decimal; }
       .sect ul { list-style-type: disc; }
     </style>
