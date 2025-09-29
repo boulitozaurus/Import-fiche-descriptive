@@ -413,6 +413,11 @@ def _fix_lists_in_soup(soup):
                     ul.replace_with(only_lists[0])
                     changed = True
 
+        # 4-ter) Fusionner les listes <ol> séparées par quelques <p> (pour éviter 1. puis 1.)
+        if _merge_split_ol_blocks(soup):
+            changed = True
+            continue
+
         def _merge_split_ol_blocks(soup: BeautifulSoup) -> bool:
             """
             Si l'on trouve : <ol> ... </ol> <p>...</p> <ol>...</ol>
