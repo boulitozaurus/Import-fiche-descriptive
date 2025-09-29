@@ -512,17 +512,30 @@ def fix_section_numbering(html: str, section_key: str) -> str:
     def set_title(el: Tag, label_text: str, italic_underline: bool):
         li = el if el.name == "li" else el.find_parent("li")
         if li:
-            # repère la liste qui contient ce li
-            ol = li.find_parent("ol")
-            ul = li.find_parent("ul")
-            lst = ol or ul
+            # Liste la plus proche
+            cur_list = li.find_parent(["ol", "ul"])
     
-            # on coupe la numérotation/puces auto pour cette liste (au cas où)
-            if ol: ol["data-noautonum"] = "1"
-            if ul: ul["data-noautonum"] = "1"
+            # Remonter jusqu'à la liste "racine" (si emboîtements OL/UL -> LI -> OL/UL ...)
+            root_list = cur_list
+            while True:
+                parent_li = root_list.find_parent("li") if root_list else None
+                parent_list = parent_li.find_parent(["ol", "ul"]) if parent_li else None
+                if parent_list:
+                    root_list = parent_list
+                else:
+                    break
     
-            # crée le <p> du titre à placer *avant* la liste
+            # Couper la numérotation/puces auto sur toutes les listes ancêtres
+            for lst in [cur_list, root_list]:
+                if lst:
+                    if lst.name == "ol":
+                        lst["data-noautonum"] = "1"
+                    if lst.name == "ul":
+                        lst["data-noautonum"] = "1"
+    
+            # Créer le <p> du titre
             p = soup.new_tag("p")
+            p["data-fixed-title"] = "1"
             if italic_underline:
                 u = soup.new_tag("u"); u.string = label_text
                 em = soup.new_tag("em"); em.append(u)
@@ -530,20 +543,21 @@ def fix_section_numbering(html: str, section_key: str) -> str:
             else:
                 p.string = label_text
     
-            if lst:
-                # 👇 insère le <p> juste avant l'<ol>/<ul> → plus d'indentation
-                lst.insert_before(p)
+            # Insérer le <p> juste AVANT la liste "racine" -> plus d'indentation
+            if root_list:
+                root_list.insert_before(p)
+            elif cur_list:
+                cur_list.insert_before(p)
             else:
-                # repli : on met avant le <li> si, pour une raison X, on n'a pas trouvé la liste
                 li.insert_before(p)
     
-            # supprime l'élément titre d'origine à l'intérieur du li
+            # Supprimer le fragment titre d'origine
             try:
                 el.decompose()
             except Exception:
                 pass
     
-            # si le <li> ne contient plus rien, on l’enlève
+            # Si la <li> est devenue vide, on la retire
             if not (li.get_text(strip=True) or li.find(True)):
                 li.decompose()
             return
@@ -603,6 +617,11 @@ def inject_css():
         line-height: 1.45;
         font-weight: 600;
         margin: .30rem 0 .30rem;
+      }
+      .sect p[data-fixed-title="1"] {
+      margin-left: 0 !important;
+      padding-left: 0 !important;
+      text-indent: 0 !important;
       }
       .sect p { margin: .30rem 0; }
       .sect ol, .sect ul { margin: .40rem 0 .60rem 1.4rem; padding-left: 1.2rem; list-style-position: outside; }
