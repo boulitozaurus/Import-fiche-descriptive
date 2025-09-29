@@ -381,26 +381,186 @@ def _postprocess_finances(html: str) -> str:
     _flatten_all_lists_to_paragraphs(soup)
     return soup.div.decode_contents()
 
+def _strip_leading_numbering(txt: str) -> str:
+    # ex. "1. Titre", "1) Titre", "- Titre" -> "Titre"
+    return re.sub(r"^\s*[\d\-\.\)\(]+\s*", "", txt or "").strip()
+
+def _iterate_top_blocks(container: Tag):
+    """
+    Itère tous les blocs visuels « de premier niveau » dans une section :
+    - <p>, <li>, <h4/h5/h6>… (renvoyés tels quels)
+    - pour <ul>/<ol>, on renvoie les <li> enfants un par un
+    - strings bruts -> <p>
+    """
+    for child in list(container.contents):
+        if isinstance(child, NavigableString):
+            if str(child).strip():
+                p = container.new_tag("p")
+                p.string = str(child)
+                child.replace_with(p)
+                yield p
+            else:
+                child.extract()
+            continue
+
+        if not isinstance(child, Tag):
+            continue
+
+        if child.name in ("ul", "ol"):
+            for li in list(child.find_all("li", recursive=False)):
+                li.extract()
+                yield li
+            child.decompose()
+        else:
+            child.extract()
+            yield child
+
+def _slice_by_labels(section_soup: BeautifulSoup, labels_norm: list[str]):
+    """
+    Sépare la section en « paniers » par libellé : {label -> [tags]} + leftovers (avant le 1er label).
+    Un label est détecté si le texte du bloc commence par l’un des labels connus (après normalisation).
+    """
+    root = section_soup.div
+    buckets = {lab: [] for lab in labels_norm}
+    leftovers = []
+    current = None
+
+    for tag in _iterate_top_blocks(root):
+        hit = _tag_starts_with_any(tag, labels_norm)
+        if hit:
+            current = hit
+            buckets[current].append(tag)
+        else:
+            if current:
+                buckets[current].append(tag)
+            else:
+                leftovers.append(tag)
+
+    return buckets, leftovers
+
+# ---------- Forçages « métier » : Risques / Bonnes raisons ----------
+
+def _enforce_fixed_risks(html: str) -> str:
+    """
+    Force l’ordre et la structure pour « Les points d’attention / Facteurs de risque » :
+    1. Risque lié au projet
+    2. Risque lié au secteur
+    3. Risque de défaut
+    On regroupe le contenu dans un <ol> avec ces 3 <li> s’ils sont présents.
+    """
+    RISK_LABELS = [
+        "Risque lié au projet",
+        "Risque lié au secteur",
+        "Risque de défaut",
+    ]
+    labs_norm = [_norm(x) for x in RISK_LABELS]
+
+    soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
+    buckets, leftovers = _slice_by_labels(soup, labs_norm)
+
+    out = BeautifulSoup("<div></div>", "html.parser")
+    root = out.div
+
+    # Contenu avant le 1er label -> on le laisse tel quel (intro)
+    for t in leftovers:
+        root.append(t)
+
+    ol = out.new_tag("ol")
+    has_any = False
+
+    for lab in labs_norm:
+        parts = buckets.get(lab) or []
+        if not parts:
+            continue
+        li = out.new_tag("li")
+        for t in parts:
+            li.append(t)
+        ol.append(li)
+        has_any = True
+
+    if has_any:
+        root.append(ol)
+
+    return root.decode_contents()
+
+def _enforce_fixed_bonnes_raisons(html: str) -> str:
+    """
+    Force l’ordre et la structure pour « Les bonnes raisons d’investir » :
+    - #1 : « Une assurance sur 100% du capital investi » (si présent)
+    - #2 : « Une fiducie-sûreté sur l’actif » (passe #1 si l’assurance n’est pas présente)
+    Résultat : <ol> avec les blocs trouvés dans l’ordre défini ci-dessus.
+    """
+    BR_LABELS = [
+        "Une assurance sur 100% du capital investi",
+        "Une fiducie-sûreté sur l'actif",
+    ]
+    labs_norm = [_norm(x) for x in BR_LABELS]
+
+    soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
+    buckets, leftovers = _slice_by_labels(soup, labs_norm)
+
+    out = BeautifulSoup("<div></div>", "html.parser")
+    root = out.div
+
+    # Laisser l'intro éventuelle
+    for t in leftovers:
+        root.append(t)
+
+    # Ordre dynamique : assurance d’abord si présente, sinon fiducie d’abord
+    order = []
+    if buckets.get(labs_norm[0]):  # assurance existe ?
+        order = [labs_norm[0], labs_norm[1]]
+    else:
+        order = [labs_norm[1], labs_norm[0]]
+
+    ol = out.new_tag("ol")
+    has_any = False
+    for lab in order:
+        parts = buckets.get(lab) or []
+        if not parts:
+            continue
+        li = out.new_tag("li")
+        for t in parts:
+            li.append(t)
+        ol.append(li)
+        has_any = True
+
+    if has_any:
+        root.append(ol)
+
+    return root.decode_contents()
+        
 def postprocess_domain_section(label: str, html: str) -> str:
     """
     Sélecteur de post-traitements selon l’intitulé PDF/CRM.
-    - Facteurs de risque / Bonnes raisons : on laisse les correctifs génériques.
-      (Si tu veux, je peux t’ajouter un bloc ici pour forcer 1/2/3 et 1/2 comme
-       on en a parlé – je le garde prêt en commentaire ci-dessous.)
-    - Budget : applique titres italique + souligné.
-    - Finances : enlève toute numérotation/puces.
+    - Points d’attention / Facteurs de risque : forçage 1/2/3
+    - Bonnes raisons : assurance #1 si présente, sinon fiducie #1
+    - Budget : titres italiques + soulignés (détection par libellé)
+    - Finances : suppression puces/numérotation
     """
     lab_n = _norm(label)
+
+    # Risques : « points d'attention », « facteurs de risque », « risques »
+    if ("point" in lab_n and "attention" in lab_n) or \
+       ("facteur" in lab_n and "risqu" in lab_n) or \
+       ("risqu" in lab_n and "bonn" not in lab_n):
+        return _enforce_fixed_risks(html)
+
+    # Bonnes raisons
+    if "bonn" in lab_n and "raison" in lab_n:
+        return _enforce_fixed_bonnes_raisons(html)
+
+    # Budget
     if "budget" in lab_n:
         return _postprocess_budget(html)
+
+    # Finances
     if "finance" in lab_n:
         return _postprocess_finances(html)
+
+    # par défaut, on laisse tel quel
     return html
 
-### --- (Option : gabarits prêts pour un forçage strict des listes)
-### def _enforce_fixed_risks(soup: BeautifulSoup): ...
-### def _enforce_fixed_bonnes_raisons(soup: BeautifulSoup): ...
-### -> Si tu veux les activer, on branchera ici, exactement comme pour Budget/Finances.
 
 def _strip_leading_numbering(s: str) -> str:
     """Supprime une numérotation de début de ligne: '1.2. ', 'I. ', 'A) ', '• ', '-', '– ' ..."""
