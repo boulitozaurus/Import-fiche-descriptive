@@ -227,25 +227,23 @@ def _image_handler(image) -> dict:
     except Exception:
         data = b""
 
+    # EMF/WMF -> téléchargement
     if ctype in ("image/x-emf", "image/emf", "image/x-wmf", "image/wmf", "application/octet-stream"):
         import uuid, base64
         uid = uuid.uuid4().hex
         fname = f"{uid}.{'emf' if 'emf' in ctype else ('wmf' if 'wmf' in ctype else 'bin')}"
-        if "img_store" not in st.session_state:
-            st.session_state["img_store"] = {}
-        st.session_state["img_store"][uid] = (fname, data, ctype)
-
-        # pixel transparent + marqueurs
+        st.session_state.setdefault("img_store", {})[uid] = (fname, data, ctype)
         return {
             "src": "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
-            "alt": "Image non affichable (EMF/WMF).",
+            "alt": "",                          # <= pas de texte alternatif visible
             "data-unsupported": "1",
             "data-uid": uid,
         }
 
     import base64
     b64 = base64.b64encode(data).decode("ascii")
-    return {"src": f"data:{ctype};base64,{b64}"}
+    # IMPORTANT : forcer alt="" pour neutraliser tout alt auto de Mammoth/Word
+    return {"src": f"data:{ctype};base64,{b64}", "alt": ""}
 
 def docx_to_html(path: str) -> str:
     """Convertit le .docx en HTML avec Mammoth (heading robustes + handler d’images)."""
@@ -277,12 +275,8 @@ def prepare_section_html(html: str):
 
     # (b) gérer les images EMF/WMF (déjà présent chez toi)
     for img in list(soup.find_all("img")):
-        if img.get("data-unsupported") == "1":
-            uid = img.get("data-uid")
-            if uid and "img_store" in st.session_state and uid in st.session_state["img_store"]:
-                fname, data, ctype = st.session_state["img_store"][uid]
-                downloads.append((uid, fname, data, ctype))
-            img.decompose()
+        if img.get("data-unsupported") != "1" and img.has_attr("alt"):
+            del img["alt"]
 
     # Unwrap des paragraphes entièrement en <strong>/<b> (Word "Caractères forts")
     for p in list(soup.find_all("p")):
@@ -376,57 +370,98 @@ def _merge_split_ol_blocks(soup: BeautifulSoup) -> bool:
 
     return changed
         
+def _promote_nested_ol_to_siblings(soup: BeautifulSoup) -> bool:
+    """
+    Si un <li> contient une <ol> (sous-liste) et que cette sous-liste ressemble à une
+    suite logique (2-6 items, phrases assez longues), on promeut les <li> internes
+    au même niveau que le <li> parent. Ça corrige les '1. 1. 1.' vus dans
+    'Les bonnes raisons d'investir'.
+    """
+    changed = False
+    for li in list(soup.find_all("li")):
+        parent = li.parent
+        if getattr(parent, "name", None) != "ol":
+            continue
+
+        inner_ols = [c for c in li.contents if getattr(c, "name", None) == "ol"]
+        if len(inner_ols) != 1:
+            continue
+
+        inner = inner_ols[0]
+        sub_items = inner.find_all("li", recursive=False)
+        if not (2 <= len(sub_items) <= 6):
+            continue
+
+        # Texte direct du li (hors sous-listes)
+        direct_text = "".join(t for t in li.find_all(string=True, recursive=False)).strip()
+        # Heuristique : on ne promeut pas si le li n'a *aucun* texte avant la sous-liste
+        if len(direct_text) < 40:
+            continue
+
+        # Heuristique simple : items "longs" => vraies raisons/phrases
+        long_items = sum(1 for s in sub_items if len(s.get_text(" ", strip=True)) >= 30)
+        if long_items < len(sub_items) // 2:
+            continue
+
+        # Promotion : placer chaque sub <li> juste après le <li> courant
+        anchor = li
+        for sub in list(sub_items):
+            anchor.insert_after(sub.extract())
+            anchor = sub
+
+        inner.decompose()
+        changed = True
+
+    return changed
+
+
 def _fix_lists_in_soup(soup):
     """
-    - Supprime les paragraphes & <li> 'puces fantômes' (•, o, – tout seul).
-    - Supprime les <p> vides au niveau des <li>.
-    - Aplati les structures du type <ul><li><ol>…</ol></li></ul>.
-    - Fusionne les listes numérotées adjacentes si besoin.
+    - Retire les paragraphes & <li> 'puces fantômes' (•, o, – tout seul).
+    - Retire les <p> vides dans les <li>.
+    - Aplati ul>li>ol / ul>li>ul mal emboîtés.
+    - Fusionne les <ol> adjacents ou séparés par des <p> non titres.
+    - *NOUVEAU* : promeut des <ol> internes au niveau du parent (corrige 1. 1. 1.).
     """
     changed = True
     while changed:
         changed = False
 
-        # 1) Enlever <p> ne contenant qu'une puce
+        # 1) <p> ne contenant qu'une puce
         for p in list(soup.find_all("p")):
             if _is_bullet_only_text(p.get_text(" ", strip=True)):
                 p.decompose()
                 changed = True
 
-        # 2) Purger <li> vides / 'puce' seule
+        # 2) <li> vides ou puces seules
         for li in list(soup.find_all("li")):
             txt = li.get_text(" ", strip=True)
             if not txt or _is_bullet_only_text(txt):
                 li.decompose()
                 changed = True
 
-        # 3) Enlever <p> vides directement sous <li>
+        # 3) <p> vides directement sous <li>
         for li in list(soup.find_all("li")):
             for p in list(li.find_all("p", recursive=False)):
                 if not p.get_text(strip=True):
                     p.decompose()
                     changed = True
 
-        # 4) Aplatir correctement ul>li>ol / ul>li>ul (li sans texte utile)
+        # 4) Aplatir ul>li>ol / ul>li>ul
         for li in list(soup.find_all("li")):
-            # Texte "utile" directement dans le <li> (hors sous-listes)
             direct_text = "".join(t for t in li.find_all(string=True, recursive=False)).strip()
             child_lists = [c for c in li.contents if getattr(c, "name", None) in ("ol", "ul")]
-
             if direct_text == "" and len(child_lists) == 1:
-                inner = child_lists[0]              # la vraie liste
-                parent = li.parent                  # ul/ol parent du li
+                inner = child_lists[0]
+                parent = li.parent
                 if getattr(parent, "name", None) not in ("ul", "ol"):
                     continue
 
-                # Cas classique: <ul><li><ol>…</ol></li></ul>  -> on remplace le wrapper par l'inner
                 if parent.name == "ul" and inner.name == "ol":
                     siblings = parent.find_all("li", recursive=False)
                     if len(siblings) == 1 and siblings[0] is li:
-                        # Le <ul> ne sert vraiment à rien -> on le remplace par l'<ol>
                         parent.replace_with(inner)
                     else:
-                        # Plus rare : plusieurs <li> existants. On insère un nouvel <ol> avant et on y déplace les items.
                         new_ol = soup.new_tag("ol")
                         for sub_li in inner.find_all("li", recursive=False):
                             new_ol.append(sub_li)
@@ -434,19 +469,16 @@ def _fix_lists_in_soup(soup):
                         li.decompose()
                     changed = True
                 else:
-                    # Même nature (ul>li>ul ou ol>li>ol) -> on fusionne: on remonte les items dans le parent
                     if parent.name == inner.name:
                         for sub_li in inner.find_all("li", recursive=False):
                             li.insert_before(sub_li)
                         li.decompose()
                         changed = True
                     else:
-                        # ol>li>ul ou ul>li>ol où on ne veut pas casser la hiérarchie :
-                        # on remplace simplement le <li> par la sous-liste (elle devient sœur dans le parent).
                         li.replace_with(inner)
                         changed = True
 
-        # 4-bis) Si un <ul> se retrouve sans <li> (ex. après remplacement), le remplacer par sa seule sous-liste
+        # 4-bis) <ul> sans <li> -> remplacer par sa seule sous-liste
         for ul in list(soup.find_all("ul")):
             lis = ul.find_all("li", recursive=False)
             if len(lis) == 0:
@@ -455,11 +487,15 @@ def _fix_lists_in_soup(soup):
                     ul.replace_with(only_lists[0])
                     changed = True
 
-        # 4-ter) recoller les listes numérotées séparées par des <p>
+        # 4-ter) recoller les <ol> séparés par des <p> (non titres)
         if _merge_split_ol_blocks(soup):
             changed = True
 
-        # 5) Fusionner <ol> consécutifs pour éviter 1. puis 1. …
+        # 4-quater) *Promotion* des sous-<ol> raisonnables
+        if _promote_nested_ol_to_siblings(soup):
+            changed = True
+
+        # 5) Fusionner <ol> consécutifs
         for ol in list(soup.find_all("ol")):
             nxt = ol.find_next_sibling()
             if getattr(nxt, "name", None) == "ol":
@@ -469,7 +505,6 @@ def _fix_lists_in_soup(soup):
                 changed = True
 
     return soup
-
 # ---------------- Load schema + fixed heading map ----------------
 
 SCHEMA_PATH = Path("crm_schema.yaml")
@@ -547,10 +582,13 @@ def inject_css():
     """, unsafe_allow_html=True)
 
 def _fix_stray_data_uri(html: str) -> str:
-    # transforme une ligne de type:  src="data:image/png;base64,...."
-    # en véritable balise <img src="data:..."/>
-    return re.sub(r'(?<!<img )src="data:image/[^"]+"', 
-                  lambda m: f'<img {m.group(0)} />', html)
+    """
+    EX-IMPORTANT : cette fonction a cassé des <img> en dupliquant l'attribut src.
+    On la neutralise (Mammoth produit déjà des <img> valides).
+    Si un jour tu dois re-traiter du texte brut 'src="data:..."' hors balise, fais-le
+    avec un parseur HTML, pas un regex.
+    """
+    return html
 
 # ---------------- UI ----------------
 
