@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Dict, List
 from streamlit.components.v1 import html as st_html
 import mammoth
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup, Tag, NavigableString
 import uuid
 import re
 # ---------------- Utils: headings + parsing ----------------
@@ -34,6 +34,8 @@ HEADING_WORDS = (
 )
 
 _HEADING_RE = re.compile(rf"^\s*(?:{HEADING_WORDS})\b", re.I)
+
+NUM_PREFIX_RE = re.compile(r"^\s*(\d+)[\.\)]\s+")
 
 def _is_section_heading_p(p: Tag) -> bool:
     """Heuristique simple pour ne PAS aspirer des titres de section dans un <li>."""
@@ -282,6 +284,10 @@ def prepare_section_html(html: str):
     for p in list(soup.find_all("p")):
         if len(p.contents) == 1 and getattr(p.contents[0], "name", None) in ("strong", "b"):
             p.contents[0].unwrap()
+    #    (on le fait sur le root ET sur les conteneurs internes de type <div>/<section>)
+    _convert_numbered_paragraphs_to_ol(soup)
+    for cont in soup.find_all(["div", "section"]):
+        _convert_numbered_paragraphs_to_ol(cont)
 
     # (c) corriger les listes fantômes
     _fix_lists_in_soup(soup)
@@ -369,7 +375,98 @@ def _merge_split_ol_blocks(soup: BeautifulSoup) -> bool:
             changed = True
 
     return changed
-        
+
+def _looks_like_heading(p_tag: Tag) -> bool:
+    """Heuristique simple pour NE PAS aspirer un titre dans un <li> précédent."""
+    if p_tag.find(["h1", "h2", "h3", "h4", "h5", "h6"]):
+        return True
+    # court + en gras => probablement un intertitre
+    txt = p_tag.get_text(" ", strip=True)
+    if len(txt) <= 80 and p_tag.find(["strong", "b"]):
+        return True
+    return False
+
+
+def _convert_numbered_paragraphs_to_ol(parent: Tag) -> bool:
+    """
+    Balaye les enfants directs de `parent` :
+      - regroupe P commençant par '1. ', '2) '… dans une vraie <ol>
+      - déplace les paragraphes 'explicatifs' qui suivent dans le <li> précédent
+    Retourne True si des changements ont été faits.
+    """
+    changed = False
+    children = list(parent.children)
+    i = 0
+    while i < len(children):
+        node = children[i]
+        if getattr(node, "name", None) == "p":
+            text = node.get_text(" ", strip=True)
+            m = NUM_PREFIX_RE.match(text or "")
+            if m:
+                # démarrage de groupe numéroté
+                ol = parent.new_tag("ol")
+                parent.insert_before(ol, node)
+                last_li = None
+
+                # Traitement des éléments consécutifs (P numérotés + P explicatifs)
+                j = i
+                while j < len(children):
+                    cur = children[j]
+                    name = getattr(cur, "name", None)
+
+                    if name == "p":
+                        t = cur.get_text(" ", strip=True)
+                        m2 = NUM_PREFIX_RE.match(t or "")
+                        if m2:
+                            # créer un <li> en enlevant le préfixe "1. " du premier texte
+                            li = parent.new_tag("li")
+                            # retire le préfixe dans le premier NavigableString
+                            first_txt = None
+                            for c in cur.contents:
+                                if isinstance(c, NavigableString):
+                                    first_txt = c
+                                    break
+                            if first_txt:
+                                m3 = NUM_PREFIX_RE.match(str(first_txt))
+                                if m3:
+                                    first_txt.replace_with(first_txt[m3.end():])
+                            # déplacer le contenu du <p> dans le <li>
+                            for c in list(cur.contents):
+                                li.append(c.extract())
+                            cur.decompose()
+                            ol.append(li)
+                            last_li = li
+                            j += 1
+                            changed = True
+                            continue
+
+                        # paragraphe explicatif directement après un <li> ?
+                        if last_li and t and not _is_bullet_only_text(t) and not _looks_like_heading(cur):
+                            last_li.append(cur.extract())
+                            children.pop(j)
+                            changed = True
+                            continue
+
+                        break  # fin du groupe
+
+                    elif name in ("ul", "ol") and last_li:
+                        # si une sous-liste arrive juste après, rattache-la au <li>
+                        last_li.append(cur.extract())
+                        children.pop(j)
+                        changed = True
+                        continue
+
+                    else:
+                        break
+
+                # rafraîchir les enfants et se placer derrière le <ol> nouvellement inséré
+                children = list(parent.children)
+                i = list(parent.children).index(ol) + 1
+                continue
+
+        i += 1
+    return changed
+
 def _promote_nested_ol_to_siblings(soup: BeautifulSoup) -> bool:
     """
     Si un <li> contient une <ol> (sous-liste) et que cette sous-liste ressemble à une
