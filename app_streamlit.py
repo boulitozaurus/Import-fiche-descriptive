@@ -285,9 +285,9 @@ def prepare_section_html(html: str):
         if len(p.contents) == 1 and getattr(p.contents[0], "name", None) in ("strong", "b"):
             p.contents[0].unwrap()
     #    (on le fait sur le root ET sur les conteneurs internes de type <div>/<section>)
-    _convert_numbered_paragraphs_to_ol(soup)
-    for cont in soup.find_all(["div", "section"]):
-        _convert_numbered_paragraphs_to_ol(cont)
+    #_convert_numbered_paragraphs_to_ol(soup)
+    #for cont in soup.find_all(["div", "section"]):
+    #    _convert_numbered_paragraphs_to_ol(cont)
 
     # (c) corriger les listes fantômes
     _fix_lists_in_soup(soup)
@@ -316,17 +316,19 @@ def _tag_starts_with_any(p: Tag, labels_norm: list[str]) -> str | None:
             return lab
     return None
 
-def _wrap_whole_tag_with_em_u(p: Tag):
-    """Transforme le contenu du tag en <em><u>...</u></em> (garde l’HTML interne)."""
-    if not p.contents:
+def _wrap_whole_tag_with_em_u(tag: Tag):
+    """Transforme *tout le contenu* du tag en <em><u>...</u></em> (à l'intérieur du tag)."""
+    if not isinstance(tag, Tag):
         return
-    em = p.new_tag("em")
-    u  = p.new_tag("u")
-    p.insert(0, em)
+    # garder le contenu existant
+    children = list(tag.contents)
+    tag.clear()
+    em = tag.new_tag("em")
+    u  = tag.new_tag("u")
+    tag.append(em)
     em.append(u)
-    # déplacer tout le contenu existant dans <u>
-    for c in list(p.contents)[1:]:
-        u.append(c.extract())
+    for c in children:
+        u.append(c)
 
 def _flatten_all_lists_to_paragraphs(soup: BeautifulSoup):
     """
@@ -456,6 +458,8 @@ def _enforce_fixed_risks(html: str) -> str:
     labs_norm = [_norm(x) for x in RISK_LABELS]
 
     soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
+    for lst in list(soup.div.find_all(["ol", "ul"], recursive=False)):
+    lst.decompose()
     buckets, leftovers = _slice_by_labels(soup, labs_norm)
 
     out = BeautifulSoup("<div></div>", "html.parser")
@@ -497,6 +501,8 @@ def _enforce_fixed_bonnes_raisons(html: str) -> str:
     labs_norm = [_norm(x) for x in BR_LABELS]
 
     soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
+    for lst in list(soup.div.find_all(["ol", "ul"], recursive=False)):
+    lst.decompose()
     buckets, leftovers = _slice_by_labels(soup, labs_norm)
 
     out = BeautifulSoup("<div></div>", "html.parser")
