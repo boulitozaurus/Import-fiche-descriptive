@@ -512,28 +512,16 @@ def fix_section_numbering(html: str, section_key: str) -> str:
     def set_title(el: Tag, label_text: str, italic_underline: bool):
         li = el if el.name == "li" else el.find_parent("li")
         if li:
-            # Couper la numérotation/puces auto
-            ol = li.find_parent("ol");  ul = li.find_parent("ul")
+            # repère la liste qui contient ce li
+            ol = li.find_parent("ol")
+            ul = li.find_parent("ul")
+            lst = ol or ul
+    
+            # on coupe la numérotation/puces auto pour cette liste (au cas où)
             if ol: ol["data-noautonum"] = "1"
             if ul: ul["data-noautonum"] = "1"
     
-            # La <li> contient-elle d'autres blocs (p/div/ol/ul/table/hx) ?
-            has_blocks = bool(li.find(["p","div","ol","ul","table","h1","h2","h3","h4","h5","h6"]))
-            only_text = (li.get_text(" ", strip=True) or "")
-    
-            if not has_blocks and len(only_text) <= 120 and el == li:
-                # Cas simple : la li est juste un titre -> remplacer par <p>
-                p = soup.new_tag("p")
-                if italic_underline:
-                    u = soup.new_tag("u"); u.string = label_text
-                    em = soup.new_tag("em"); em.append(u)
-                    p.append(em)
-                else:
-                    p.string = label_text
-                li.replace_with(p)
-                return
-    
-            # Cas courant Budget : la <li> contient déjà le texte “titre” + du contenu -> on sort le titre
+            # crée le <p> du titre à placer *avant* la liste
             p = soup.new_tag("p")
             if italic_underline:
                 u = soup.new_tag("u"); u.string = label_text
@@ -542,11 +530,22 @@ def fix_section_numbering(html: str, section_key: str) -> str:
             else:
                 p.string = label_text
     
-            li.insert_before(p)  # 👈 le titre est désormais hors de la liste (plus d'indentation)
+            if lst:
+                # 👇 insère le <p> juste avant l'<ol>/<ul> → plus d'indentation
+                lst.insert_before(p)
+            else:
+                # repli : on met avant le <li> si, pour une raison X, on n'a pas trouvé la liste
+                li.insert_before(p)
+    
+            # supprime l'élément titre d'origine à l'intérieur du li
             try:
-                el.decompose()    # on supprime l'élément titre d'origine à l'intérieur de la <li>
+                el.decompose()
             except Exception:
                 pass
+    
+            # si le <li> ne contient plus rien, on l’enlève
+            if not (li.get_text(strip=True) or li.find(True)):
+                li.decompose()
             return
     
         # Pas dans une liste : réécriture in-situ
@@ -556,7 +555,7 @@ def fix_section_numbering(html: str, section_key: str) -> str:
             em = soup.new_tag("em"); em.append(u)
             el.append(em)
         else:
-            el.string = label_text
+        el.string = label_text
 
     for i, title in enumerate(order, 1):
         el = first[title]
