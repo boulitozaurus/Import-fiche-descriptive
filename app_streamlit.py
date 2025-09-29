@@ -508,66 +508,85 @@ def fix_section_numbering(html: str, section_key: str) -> str:
     if section_key == 'budget_fr' and "Stress test" in first and "Stress test" not in order:
         order.append("Stress test")
 
+    def _remove_leading_label_from_li(li: Tag, label_norm: str):
+    """Retire la 'ligne-titre' au début de la <li>, qu'elle soit dans <p>/<em>/<u>/<strong> ou texte brut."""
+    def norm(s: str) -> str:
+        s = re.sub(r'^\s*(?:[\(\[]?\d+(?:\.\d+)*[\)\.]?|[ivxlcdm]+[\)\.]|[A-Z]\)|•|–|—|-|\*)\s*', '', s or '', flags=re.I)
+        s = _strip_accents((s or "").lower()).replace("\u00A0"," ").strip()
+        s = s.replace(" d’"," d'").replace(" l’"," l'")
+        return " ".join(s.split())
+
+    # 1) si premier enfant bloc ressemble au titre, on le supprime
+    for child in list(li.children):
+        if isinstance(child, NavigableString) and not str(child).strip():
+            continue
+        if getattr(child, "name", None) in {"p","strong","b","em","i","u","span"}:
+            t = child.get_text(" ", strip=True) or ""
+            if norm(t).startswith(label_norm):
+                child.decompose()
+            break
+        if isinstance(child, NavigableString):
+            t = str(child)
+            if norm(t).startswith(label_norm):
+                # on coupe juste le début correspondant
+                child.replace_with("")
+            break
+        # autre tag (ex: div) -> on arrête, pas de risque ici
+        break
+
     # Appliquer la numérotation visible (et neutraliser la numérotation auto des <ol>)
     def set_title(el: Tag, label_text: str, italic_underline: bool):
+        # repère si on est dans une <li>
         li = el if el.name == "li" else el.find_parent("li")
         if li:
-            # Liste la plus proche
-            cur_list = li.find_parent(["ol", "ul"])
-    
-            # Remonter jusqu'à la liste "racine" (si emboîtements OL/UL -> LI -> OL/UL ...)
+            # liste la plus proche
+            cur_list = li.find_parent(["ol","ul"])
+            # remonter à la liste racine
             root_list = cur_list
             while True:
-                parent_li = root_list.find_parent("li") if root_list else None
-                parent_list = parent_li.find_parent(["ol", "ul"]) if parent_li else None
-                if parent_list:
-                    root_list = parent_list
-                else:
-                    break
+                pli = root_list.find_parent("li") if root_list else None
+                plist = pli.find_parent(["ol","ul"]) if pli else None
+                if plist: root_list = plist
+                else: break
     
-            # Couper la numérotation/puces auto sur toutes les listes ancêtres
-            for lst in [cur_list, root_list]:
-                if lst:
-                    if lst.name == "ol":
-                        lst["data-noautonum"] = "1"
-                    if lst.name == "ul":
-                        lst["data-noautonum"] = "1"
+            # neutralise les marqueurs auto
+            for lst in filter(None, [cur_list, root_list]):
+                lst["data-noautonum"] = "1"
     
-            # Créer le <p> du titre
+            # crée le <p> titre (soulignement inline)
             p = soup.new_tag("p")
             p["data-fixed-title"] = "1"
             if italic_underline:
-                u = soup.new_tag("u"); u.string = label_text
-                em = soup.new_tag("em"); em.append(u)
+                em = soup.new_tag("em")
+                span = soup.new_tag("span")
+                span["style"] = "text-decoration: underline;"
+                span.string = label_text
+                em.append(span)
                 p.append(em)
             else:
                 p.string = label_text
     
-            # Insérer le <p> juste AVANT la liste "racine" -> plus d'indentation
-            if root_list:
-                root_list.insert_before(p)
-            elif cur_list:
-                cur_list.insert_before(p)
-            else:
-                li.insert_before(p)
+            # insère avant la liste racine (ou la plus proche à défaut)
+            (root_list or cur_list or li).insert_before(p)
     
-            # Supprimer le fragment titre d'origine
-            container = el.find_parent("p") if el else None
-            try:
-                (container or el).decompose()
-            except Exception:
-                pass
+            # retire la ligne-titre d'origine dans la <li>
+            lbl_norm = _strip_accents(label_text.lower()).replace("\u00A0"," ")
+            lbl_norm = " ".join(lbl_norm.split())
+            _remove_leading_label_from_li(li, lbl_norm)
     
-            # Si la <li> est devenue vide, on la retire
+            # si la <li> est vide après nettoyage, on l'enlève
             if not (li.get_text(strip=True) or li.find(True)):
                 li.decompose()
             return
     
-        # Pas dans une liste : réécriture in-situ
+        # Pas dans une liste : réécriture in situ
         el.clear()
         if italic_underline:
-            u = soup.new_tag("u"); u.string = label_text
-            em = soup.new_tag("em"); em.append(u)
+            em = soup.new_tag("em")
+            span = soup.new_tag("span")
+            span["style"] = "text-decoration: underline;"
+            span.string = label_text
+            em.append(span)
             el.append(em)
         else:
             el.string = label_text
