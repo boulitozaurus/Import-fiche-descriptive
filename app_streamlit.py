@@ -382,7 +382,10 @@ def prepare_section_html(html: str):
             if uid and "img_store" in st.session_state and uid in st.session_state["img_store"]:
                 fname, data, ctype = st.session_state["img_store"][uid]
                 downloads.append((uid, fname, data, ctype))
-            img.decompose()  # on retire l’img fantôme du HTML
+                # ⬇️ Remplacer l'image par un commentaire HTML "DL:<uid>"
+                img.replace_with(Comment(f"DL:{uid}"))
+            else:
+                img.decompose()
             
     _fix_lists_in_soup(soup)
 
@@ -427,22 +430,32 @@ def fix_section_numbering(html: str, section_key: str) -> str:
         return " ".join(s.split())
 
     expected = list(EXPECTED[section_key])
-    alias = { nrm(x): x for x in expected }
+
+    # Carte libellé-normalisé -> libellé canonique
+    expected_map = { nrm(lbl): lbl for lbl in expected }
+
     # Budget : variantes de "Couverture(s) des intérêts"
     if section_key == 'budget_fr':
-        alias[nrm("Couvertures des intérêts")] = "Couverture des intérêts"
-        alias[nrm("couverture des interets")]  = "Couverture des intérêts"
-        alias[nrm("couvertures des interets")] = "Couverture des intérêts"
+        expected_map[nrm("Couvertures des intérêts")] = "Couverture des intérêts"
+        expected_map[nrm("couverture des interets")]  = "Couverture des intérêts"
+        expected_map[nrm("couvertures des interets")] = "Couverture des intérêts"
 
-    # Collecter premières occurrences
+    # Bonnes raisons : variantes tolérantes sur "fiducie-sûreté"
+    if section_key == 'bonnes_raisons_fr':
+        expected_map[nrm("Une fiducie surete sur l actif")] = "Une fiducie-sûreté sur l'actif"
+        expected_map[nrm("Une fiducie surete sur l'actif")] = "Une fiducie-sûreté sur l'actif"
+
+    # Collecter la première occurrence de chaque libellé (match en début de ligne)
     first = {}
     for el in soup.find_all(['h1','h2','h3','h4','h5','h6','p','li','strong','b','em','i','u']):
         txt = el.get_text(" ", strip=True)
         if not txt or len(txt) > 180:
             continue
-        key = alias.get(nrm(txt))
-        if key and key not in first:
-            first[key] = el
+        nn = nrm(txt)
+        for norm_lbl, canon in expected_map.items():
+            if nn.startswith(norm_lbl) and canon not in first:
+                first[canon] = el
+                break
 
     # Bonnes raisons : Fiducie devient #1 si Assurance absente
     if section_key == 'bonnes_raisons_fr':
@@ -454,21 +467,19 @@ def fix_section_numbering(html: str, section_key: str) -> str:
                 "Une fiducie-sûreté sur l'actif",
             ]
 
-    # Ordre final (et Stress test seulement s'il existe)
+    # Ordre final (Stress test uniquement s'il existe)
     order = [x for x in expected if x in first]
     if section_key == 'budget_fr' and "Stress test" in first and "Stress test" not in order:
         order.append("Stress test")
 
-    # Appliquer numérotation visible (sans déclencher d'autres conversions)
+    # Appliquer la numérotation visible (et neutraliser la numérotation auto des <ol>)
     def set_title(el: Tag, label_text: str, italic_underline: bool):
-        # Si l’élément est dans une <li> d’une liste numérotée, on neutralise la numérotation auto
         li = el if el.name == "li" else el.find_parent("li")
         if li:
             ol = li.find_parent("ol")
             if ol:
-                ol["data-noautonum"] = "1"
+                ol["data-noautonum"] = "1"  # le CSS coupe la puce auto
 
-        # Remplacement "propre"
         target = el
         target.clear()
         if italic_underline:
@@ -480,8 +491,7 @@ def fix_section_numbering(html: str, section_key: str) -> str:
 
     for i, title in enumerate(order, 1):
         el = first[title]
-        label = f"{i}. {title}" if section_key != 'budget_fr' else f"{i}. {title}"
-        set_title(el, label, italic_underline=(section_key == 'budget_fr'))
+        set_title(el, f"{i}. {title}", italic_underline=(section_key == 'budget_fr'))
 
     return soup.div.decode_contents()
 
@@ -617,11 +627,25 @@ if uploaded is not None:
     
         raw_html = fr_payload.get(key, "")
         clean_html, dls = prepare_section_html(raw_html)
-    
+        dlmap = {uid: (fname, data, ctype) for uid, fname, data, ctype in dls}
+        
+        parts = re.split(r'<!--DL:([0-9a-f]+)-->', clean_html, flags=re.I)
+        
         st.subheader(label)
-        st.markdown(f"<div class='sect'>{clean_html or '<p><em>(vide)</em></p>'}</div>", unsafe_allow_html=True)
-    
-        for uid, fname, data, ctype in dls:
-            st.download_button(f"Télécharger {fname}", data=data, file_name=fname, mime=ctype, key=f"dl_{uid}")
-    
-        st.divider()
+        for idx, part in enumerate(parts):
+            if idx % 2 == 0:
+                # morceau HTML normal
+                if part.strip():
+                    st.markdown(f"<div class='sect'>{part}</div>", unsafe_allow_html=True)
+            else:
+                # jeton DL -> bouton
+                uid = part.lower()
+                if uid in dlmap:
+                    fname, data, ctype = dlmap[uid]
+                    st.download_button(
+                        f"Télécharger {fname}",
+                        data=data,
+                        file_name=fname,
+                        mime=ctype,
+                        key=f"dl_{uid}"
+                    )
