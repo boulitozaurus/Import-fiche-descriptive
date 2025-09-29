@@ -534,92 +534,91 @@ def fix_section_numbering(html: str, section_key: str) -> str:
             # autre tag (ex: div) -> on arrête, pas de risque ici
             break
 
-    def _nrm_local(s: str) -> str:
-        s = re.sub(r'^\s*(?:[\(\[]?\d+(?:\.\d+)*[\)\.]?|[ivxlcdm]+[\)\.]|[A-Z]\)|•|–|—|-|\*)\s*', '', s or '', flags=re.I)
-        s = _strip_accents((s or "").lower()).replace("\u00A0"," ").strip()
-        s = s.replace(" d’"," d'").replace(" l’"," l'")
-        return " ".join(s.split())
-
-    # Appliquer la numérotation visible (et neutraliser la numérotation auto des <ol>)
-    def set_title(el: Tag, label_text: str, italic_underline: bool):
-        """
-        Déplace le *bloc titre d'origine* hors de la liste (avant la liste racine), le réécrit,
-        et supprime tout double. Aligne "Prix de revient" comme les autres.
-        """
-        # 0) si on a déjà inséré un titre fixe identique juste avant, ne rien dupliquer
-        prev = el.find_previous_sibling("p")
-        if prev and _nrm_local(prev.get_text(" ", strip=True)).startswith(_nrm_local(label_text)):
-            # déjà présent et fixé
-            return
+        def _nrm_local(s: str) -> str:
+            s = re.sub(r'^\s*(?:[\(\[]?\d+(?:\.\d+)*[\)\.]?|[ivxlcdm]+[\)\.]|[A-Z]\)|•|–|—|-|\*)\s*', '', s or '', flags=re.I)
+            s = _strip_accents((s or "").lower()).replace("\u00A0"," ").strip()
+            s = s.replace(" d’"," d'").replace(" l’"," l'")
+            return " ".join(s.split())
     
-        li = el if el.name == "li" else el.find_parent("li")
-        if li:
-            # -- Trouver la liste racine --
-            cur_list = li.find_parent(["ol","ul"])
-            root_list = cur_list
-            while True:
-                pli = root_list.find_parent("li") if root_list else None
-                plist = pli.find_parent(["ol","ul"]) if pli else None
-                if plist: root_list = plist
-                else: break
-    
-            # -- Neutraliser les marqueurs auto sur toutes les listes ancêtres --
-            for lst in filter(None, [cur_list, root_list]):
-                lst["data-noautonum"] = "1"
-    
-            # -- Identifier le *bloc* titre d'origine à MIGRER (de préférence un <p>) --
-            source_p = el.find_parent("p")
-            if not source_p:
-                # à défaut, si el est déjà un <li> sans <p>, on crée un p à partir du li
-                source_p = soup.new_tag("p")
-                source_p.string = el.get_text(" ", strip=True)
-                el.replace_with(source_p)
-    
-            # -- EXTRAIRE ce <p> hors de la <li> et le placer *avant la liste racine* --
-            source_p.extract()
-            target_p = source_p
-            (root_list or cur_list or li).insert_before(target_p)
-    
-            # -- Réécrire le contenu (italique + souligné) et marquer le titre --
-            target_p.clear()
-            target_p["data-fixed-title"] = "1"
+        # Appliquer la numérotation visible (et neutraliser la numérotation auto des <ol>)
+        def set_title(el: Tag, label_text: str, italic_underline: bool):
+            """
+            Déplace le *bloc titre d'origine* hors de la liste (avant la liste racine), le réécrit,
+            et supprime tout double. Aligne "Prix de revient" comme les autres.
+            """
+            # 0) si on a déjà inséré un titre fixe identique juste avant, ne rien dupliquer
+            prev = el.find_previous_sibling("p")
+            if prev and _nrm_local(prev.get_text(" ", strip=True)).startswith(_nrm_local(label_text)):
+                # déjà présent et fixé
+                return
+        
+            li = el if el.name == "li" else el.find_parent("li")
+            if li:
+                # -- Trouver la liste racine --
+                cur_list = li.find_parent(["ol","ul"])
+                root_list = cur_list
+                while True:
+                    pli = root_list.find_parent("li") if root_list else None
+                    plist = pli.find_parent(["ol","ul"]) if pli else None
+                    if plist: root_list = plist
+                    else: break
+        
+                # -- Neutraliser les marqueurs auto sur toutes les listes ancêtres --
+                for lst in filter(None, [cur_list, root_list]):
+                    lst["data-noautonum"] = "1"
+        
+                # -- Identifier le *bloc* titre d'origine à MIGRER (de préférence un <p>) --
+                source_p = el.find_parent("p")
+                if not source_p:
+                    # à défaut, si el est déjà un <li> sans <p>, on crée un p à partir du li
+                    source_p = soup.new_tag("p")
+                    source_p.string = el.get_text(" ", strip=True)
+                    el.replace_with(source_p)
+        
+                # -- EXTRAIRE ce <p> hors de la <li> et le placer *avant la liste racine* --
+                source_p.extract()
+                target_p = source_p
+                (root_list or cur_list or li).insert_before(target_p)
+        
+                # -- Réécrire le contenu (italique + souligné) et marquer le titre --
+                target_p.clear()
+                target_p["data-fixed-title"] = "1"
+                if italic_underline:
+                    em = soup.new_tag("em")
+                    span = soup.new_tag("span")
+                    span["style"] = "text-decoration: underline;"
+                    span.string = label_text
+                    em.append(span)
+                    target_p.append(em)
+                else:
+                    target_p.string = label_text
+        
+                # -- Nettoyer la <li> : supprimer une éventuelle 2e ligne-titre résiduelle en tête --
+                for child in list(li.children):
+                    if isinstance(child, NavigableString) and not str(child).strip():
+                        child.extract(); continue
+                    t = (child.get_text(" ", strip=True) if hasattr(child, "get_text") else str(child)).strip()
+                    if t and _nrm_local(t).startswith(_nrm_local(label_text)):
+                        child.decompose()
+                    break
+        
+                # -- Si la <li> est désormais vide, la retirer --
+                if not (li.get_text(strip=True) or li.find(True)):
+                    li.decompose()
+                return
+        
+            # Pas dans une liste : réécriture in-situ
+            el.clear()
+            el["data-fixed-title"] = "1"
             if italic_underline:
                 em = soup.new_tag("em")
                 span = soup.new_tag("span")
                 span["style"] = "text-decoration: underline;"
                 span.string = label_text
                 em.append(span)
-                target_p.append(em)
+                el.append(em)
             else:
-                target_p.string = label_text
-    
-            # -- Nettoyer la <li> : supprimer une éventuelle 2e ligne-titre résiduelle en tête --
-            for child in list(li.children):
-                if isinstance(child, NavigableString) and not str(child).strip():
-                    child.extract(); continue
-                t = (child.get_text(" ", strip=True) if hasattr(child, "get_text") else str(child)).strip()
-                if t and _nrm_local(t).startswith(_nrm_local(label_text)):
-                    child.decompose()
-                break
-    
-            # -- Si la <li> est désormais vide, la retirer --
-            if not (li.get_text(strip=True) or li.find(True)):
-                li.decompose()
-            return
-    
-        # Pas dans une liste : réécriture in-situ
-        el.clear()
-        el["data-fixed-title"] = "1"
-        if italic_underline:
-            em = soup.new_tag("em")
-            span = soup.new_tag("span")
-            span["style"] = "text-decoration: underline;"
-            span.string = label_text
-            em.append(span)
-            el.append(em)
-        else:
-            el.string = label_text
-
+                el.string = label_text
 
     for i, title in enumerate(order, 1):
         el = first[title]
