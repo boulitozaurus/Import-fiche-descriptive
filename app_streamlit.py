@@ -461,10 +461,12 @@ def fix_section_numbering(html: str, section_key: str) -> str:
 
     # Appliquer numérotation visible (sans déclencher d'autres conversions)
     def set_title(el: Tag, label_text: str, italic_underline: bool):
-        # Si déjà dans <li>, on n'ajoute pas "1. " (la liste affichera le numéro si elle existe)
-        in_li = (el.name == "li") or bool(el.find_parent("li"))
-        if in_li and ". " in label_text:
-            label_text = label_text.split(". ", 1)[-1]
+        # Si l’élément est dans une <li> d’une liste numérotée, on neutralise la numérotation auto
+        li = el if el.name == "li" else el.find_parent("li")
+        if li:
+            ol = li.find_parent("ol")
+            if ol:
+                ol["data-noautonum"] = "1"
 
         # Remplacement "propre"
         target = el
@@ -528,6 +530,9 @@ def inject_css():
       .sect ol, .sect ul { margin: .40rem 0 .60rem 1.4rem; padding-left: 1.2rem; list-style-position: outside; }
       .sect ol { list-style-type: decimal; }
       .sect ul { list-style-type: disc; }
+      
+      .sect ol[data-noautonum="1"] { list-style: none; padding-left: 0; margin-left: 0; }
+      .sect ol[data-noautonum="1"] > li { margin-left: 0; }
     </style>
     """, unsafe_allow_html=True)
 
