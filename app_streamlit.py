@@ -459,7 +459,7 @@ def _enforce_fixed_risks(html: str) -> str:
 
     soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
     for lst in list(soup.div.find_all(["ol", "ul"], recursive=False)):
-    lst.decompose()
+        lst.decompose()
     buckets, leftovers = _slice_by_labels(soup, labs_norm)
 
     out = BeautifulSoup("<div></div>", "html.parser")
@@ -502,7 +502,7 @@ def _enforce_fixed_bonnes_raisons(html: str) -> str:
 
     soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
     for lst in list(soup.div.find_all(["ol", "ul"], recursive=False)):
-    lst.decompose()
+        lst.decompose()
     buckets, leftovers = _slice_by_labels(soup, labs_norm)
 
     out = BeautifulSoup("<div></div>", "html.parser")
