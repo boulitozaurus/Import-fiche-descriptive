@@ -160,7 +160,7 @@ def docx_to_html(file_bytes: bytes) -> str:
     return html
 
 def _img_to_data_uri(image: Any) -> str:
-    """Image Mammoth -> data URI (png/jpeg/gif, sinon base64 générique)."""
+  """Image Mammoth -> data URI (png/jpeg/gif, sinon base64 générique)."""
     content_type = image.content_type or "application/octet-stream"
     data = image.read()
     b64 = base64.b64encode(data).decode("ascii")
