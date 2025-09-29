@@ -248,13 +248,13 @@ def prepare_section_html(html: str):
     soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
     downloads = []
 
-    # 3.a) supprimer les phrases parasites type "Le contenu généré par l’IA peut être incorrect."
+    # (a) supprimer la phrase IA parasite
     IA_PAT = re.compile(r"le contenu\s+g[ée]n[ée]r[ée]\s+par l[’' ]?ia\s+peut\s+être\s+incorrect\.?", re.I)
     for p in list(soup.find_all("p")):
         if IA_PAT.search(p.get_text(" ", strip=True)):
             p.decompose()
 
-    # 3.b) images EMF/WMF : on remplace l'img transparente par rien, et on collecte un bouton DL
+    # (b) gérer les images EMF/WMF (déjà présent chez toi)
     for img in list(soup.find_all("img")):
         if img.get("data-unsupported") == "1":
             uid = img.get("data-uid")
@@ -263,12 +263,16 @@ def prepare_section_html(html: str):
                 downloads.append((uid, fname, data, ctype))
             img.decompose()
 
-    # 3.c) réparer les src="data:..." orphelins en réelles balises <img>
-    cleaned = _fix_stray_data_uri(soup.div.decode_contents())
-    # 2nd-chance : si une variante est passée à travers, on la supprime au niveau du HTML final
-    cleaned = re.sub(r'(?is)le contenu\s+g[ée]n[ée]r[ée]\s+par l[’\' ]?ia\s+peut\s+être\s+incorrect\.?', '', cleaned)
-    return cleaned, downloads
+    # (c) corriger les listes fantômes
+    _fix_lists_in_soup(soup)
 
+    # (d) réparer les data URI orphelines -> vraies <img>
+    cleaned = _fix_stray_data_uri(soup.div.decode_contents())
+
+    # (e) 2e filet pour la phrase IA si encodage différent
+    cleaned = re.sub(r'(?is)le contenu\s+g[ée]n[ée]r[ée]\s+par l[’\' ]?ia\s+peut\s+être\s+incorrect\.?', '', cleaned)
+
+    return cleaned, downloads
 
 def _strip_leading_numbering(s: str) -> str:
     """Supprime une numérotation de début de ligne: '1.2. ', 'I. ', 'A) ', '• ', '-', '– ' ..."""
@@ -293,6 +297,30 @@ def build_heading_index(expected_headings: list[str], word_to_pdf: dict[str, str
     idx[_norm("description")] = "Introduction"
     idx[_norm("contexte & usage des fonds")] = "Contexte et usage des fonds"
     return idx
+
+BULLET_ONLY_RE = re.compile(r'^\s*(?:[•◦·\-–o]+)\s*$', re.I)
+
+def _fix_lists_in_soup(soup):
+    """
+    - Enlève les paragraphes 'puce fantôme' (ne contenant qu'un symbole de puce)
+    - Aplati ul>li>ol (puce vide qui enveloppe une vraie liste numérotée)
+    """
+    # 1) Supprimer les <p> qui ne contiennent qu'un symbole de puce
+    for p in list(soup.find_all("p")):
+        if BULLET_ONLY_RE.match(p.get_text(" ", strip=True)):
+            p.decompose()
+
+    # 2) Aplatir ul>li>ol / ul>li>ul fantômes
+    for li in list(soup.find_all("li")):
+        # on ne garde que les nœuds élémentaires
+        children = [c for c in li.children if getattr(c, "name", None)]
+        if len(children) == 1 and children[0].name in ("ol", "ul") and not li.get_text(strip=True):
+            inner_list = children[0]
+            for sub_li in inner_list.find_all("li", recursive=False):
+                li.insert_before(sub_li)
+            li.decompose()
+
+    return soup
 
 # ---------------- Load schema + fixed heading map ----------------
 
@@ -351,11 +379,30 @@ def load_heading_map() -> Dict[str, str]:
 def inject_css():
     st.markdown("""
     <style>
-      .sect p { margin:.35rem 0; }
-      .sect ol, .sect ul { margin:.35rem 0 .55rem 1.4rem; padding-left:1.4rem; list-style-position:outside; }
-      .sect li { margin:.15rem 0; }
-      .sect table { width:100%; border-collapse:collapse; }
-      .sect td, .sect th { border:1px solid #ccc; padding:6px; }
+      /* Titres rendus par Streamlit (st.subheader) => OK */
+      /* Contenu des sections (.sect) : normaliser l'apparence des h1..h6 hérités du Word */
+      .sect h1, .sect h2, .sect h3 {
+        font-size: 1.15rem;
+        line-height: 1.5;
+        font-weight: 600;
+        margin: .35rem 0 .35rem;
+      }
+      .sect h4, .sect h5, .sect h6 {
+        font-size: 1.05rem;
+        line-height: 1.45;
+        font-weight: 600;
+        margin: .30rem 0 .30rem;
+      }
+      .sect p { margin: .30rem 0; }
+
+      /* Listes : marge, retrait et style lisible */
+      .sect ol, .sect ul {
+        margin: .40rem 0 .60rem 1.4rem;
+        padding-left: 1.2rem;
+        list-style-position: outside;
+      }
+      .sect ol { list-style-type: decimal; }
+      .sect ul { list-style-type: disc; }
     </style>
     """, unsafe_allow_html=True)
 
