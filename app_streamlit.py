@@ -660,18 +660,20 @@ def inject_css():
         font-weight: 600;
         margin: .30rem 0 .30rem;
       }
-      .sect p[data-fixed-title="1"] {
-      margin-left: 0 !important;
-      padding-left: 0 !important;
-      text-indent: 0 !important;
+      .sect p[data-fixed-title="1"]{
+      /* indentation uniforme pour tous les titres forcés */
+        margin-left: 1.4rem !important;   /* même recul que tes listes */
+        padding-left: 0 !important;
+        text-indent: 0 !important;
+        margin-top: .30rem;
+        margin-bottom: .30rem;
       }
       .sect p { margin: .30rem 0; }
       .sect ol, .sect ul { margin: .40rem 0 .60rem 1.4rem; padding-left: 1.2rem; list-style-position: outside; }
       .sect ol { list-style-type: decimal; }
       .sect ul { list-style-type: disc; }
       .sect ul[data-noautonum="1"] { list-style: none; padding-left: 0; margin-left: 0; }
-      .sect ul[data-noautonum="1"] > li { margin-left: 0; }
-      
+      .sect ul[data-noautonum="1"] > li { margin-left: 0; 
       .sect ol[data-noautonum="1"] { list-style: none; padding-left: 0; margin-left: 0; }
       .sect ol[data-noautonum="1"] > li { margin-left: 0; }
     </style>
