@@ -660,6 +660,13 @@ def inject_css():
         font-weight: 600;
         margin: .30rem 0 .30rem;
       }
+      .sect p[data-fixed-title="1"] em,
+      .sect p[data-fixed-title="1"] u,
+      .sect p[data-fixed-title="1"] em > span {
+        text-decoration: underline !important;
+        text-underline-offset: 2px;
+        text-decoration-thickness: from-font;
+      }
       .sect p[data-fixed-title="1"]{
       /* indentation uniforme pour tous les titres forcés */
         margin-left: 2.8rem !important;   /* même recul que tes listes */
