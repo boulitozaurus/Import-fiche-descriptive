@@ -491,7 +491,6 @@ def fix_section_numbering(html: str, section_key: str) -> str:
     # 1) repérer la 1re occurrence de chaque libellé (début de ligne)
     first = {}
     
-    # on scanne AUSSI les textes nus après un tableau (cas "Prix de revient")
     for node in soup.div.descendants:
         if isinstance(node, NavigableString):
             txt = (str(node) or "").strip()
@@ -500,21 +499,29 @@ def fix_section_numbering(html: str, section_key: str) -> str:
             nn = nrm(txt)
             for norm_lbl, canon in expected_map.items():
                 if nn.startswith(norm_lbl) and canon not in first:
-                    # privilégier un conteneur bloc si possible
                     holder = node.find_parent(["p","li","td","th"]) or node
                     first[canon] = holder
                     break
-        elif isinstance(node, Tag):
-            if node.name in ['h1','h2','h3','h4','h5','h6','p','li','strong','b','em','i','u','span','td','th']:
-                txt = node.get_text(" ", strip=True)
-                if not txt or len(txt) > 180:
-                    continue
-                nn = nrm(txt)
-                for norm_lbl, canon in expected_map.items():
-                    if nn.startswith(norm_lbl) and canon not in first:
-                        first[canon] = node
-                        break
-
+        elif isinstance(node, Tag) and node.name in ['h1','h2','h3','h4','h5','h6','p','li','strong','b','em','i','u','span','td','th']:
+            txt = node.get_text(" ", strip=True)
+            if not txt or len(txt) > 180:
+                continue
+            nn = nrm(txt)
+            for norm_lbl, canon in expected_map.items():
+                if nn.startswith(norm_lbl) and canon not in first:
+                    first[canon] = node
+                    break
+    # Secours : si "Prix de revient" non trouvé, on le cherche par regex (cas 'texte nu après tableau')
+    if section_key == 'budget_fr' and "Prix de revient" not in first:
+        m = soup.find(string=re.compile(r'(?i)\bprix\s*de\s*reven[ti]\b'))
+        if m:
+            first["Prix de revient"] = m.find_parent(["p","li","td","th"]) or m
+        else:
+            # ultime secours : on l'insère en tête de section, il sera réécrit juste après
+            p = soup.new_tag("p"); p.string = "Prix de revient"
+            soup.div.insert(0, p)
+            first["Prix de revient"] = p
+        
     # 2) ordre imposé (Bonnes raisons : Fiducie devient #1 si Assurance absente)
     if section_key == 'bonnes_raisons_fr':
         if "Une assurance sur 100% du capital investi" not in first:
@@ -712,6 +719,7 @@ def inject_css():
         margin-top: .30rem;
         margin-bottom: .30rem;
       }
+      
       .sect ol { list-style: none !important; margin-left: 0 !important; padding-left: 0 !important; }
       .sect ol > li { margin-left: 0 !important; }
       .sect p { margin: .30rem 0; }
