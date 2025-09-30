@@ -544,7 +544,7 @@ def force_budget_structure(html: str) -> str:
 
     # 4) Assembler : KPI -> 1. Prix de revient -> 2/3/4/5 sans réinjecter les titres bruts
     out = []
-    out.extend(str(el) for el in lead_tables)
+    out.extend(str(el) for el in lead_blocks)
 
     def is_pure_title(el):
         t = nrm(node_text(el))
