@@ -647,7 +647,21 @@ def fix_section_numbering(html: str, section_key: str) -> str:
         for ol in soup.find_all('ol'):
             ol['data-noautonum'] = '1'
 
-    return soup.div.decode_contents()
+    res = soup.div.decode_contents()
+    
+    if section_key == 'budget_fr':
+        # Si "1. Prix de revient" n'apparaît nulle part (insensible à la casse/espaces), on le rajoute en tête
+        if not re.search(r'(?:^|>)\s*1\.\s*prix\s*de\s*reven[ti]', res, flags=re.I):
+            res = "<p data-fixed-title='1'><em><u>1. Prix de revient</u></em></p>" + res
+        # Et on supprime toute ligne "Prix de revient" orpheline (sans numéro) potentiellement laissée par Word
+        res = re.sub(
+            r'<(?:p|span|em|u|strong|a)[^>]*>\s*prix\s*de\s*reven[ti]\s*</(?:p|span|em|u|strong|a)>',
+            '',
+            res,
+            flags=re.I
+        )
+    
+    return res
 
 def apply_fixed_numbering(fr_payload: dict) -> dict:
     """Applique la numérotation fixe aux sections concernées."""
