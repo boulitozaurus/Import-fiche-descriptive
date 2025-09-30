@@ -579,10 +579,9 @@ def fix_section_numbering(html: str, section_key: str) -> str:
             target_p.clear()
             if italic_underline:
                 em = soup.new_tag("em")
-                span = soup.new_tag("span")
-                span["style"] = "text-decoration: underline;"
-                span.string = label_text
-                em.append(span)
+                u  = soup.new_tag("u")
+                u.string = label_text
+                em.append(u)
                 target_p.append(em)
             else:
                 target_p.string = label_text
@@ -616,6 +615,10 @@ def fix_section_numbering(html: str, section_key: str) -> str:
     for i, title in enumerate(order, 1):
         el = first[title]
         set_title(el, f"{i}. {title}", italic_underline=(section_key == 'budget_fr'))
+
+    if section_key in ('budget_fr', 'points_attention_fr', 'bonnes_raisons_fr'):
+        for ol in soup.find_all('ol'):
+            ol['data-noautonum'] = '1'
 
     return soup.div.decode_contents()
 
@@ -681,6 +684,8 @@ def inject_css():
         margin-top: .30rem;
         margin-bottom: .30rem;
       }
+      .sect ol { list-style: none !important; margin-left: 0 !important; padding-left: 0 !important; }
+      .sect ol > li { margin-left: 0 !important; }
       .sect p { margin: .30rem 0; }
       .sect ol, .sect ul { margin: .40rem 0 .60rem 1.4rem; padding-left: 1.2rem; list-style-position: outside; }
       .sect ol { list-style-type: decimal; }
