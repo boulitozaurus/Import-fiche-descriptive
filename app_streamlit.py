@@ -490,15 +490,30 @@ def fix_section_numbering(html: str, section_key: str) -> str:
 
     # 1) repérer la 1re occurrence de chaque libellé (début de ligne)
     first = {}
-    for el in soup.find_all(['h1','h2','h3','h4','h5','h6','p','li','strong','b','em','i','u','span']):
-        txt = el.get_text(" ", strip=True)
-        if not txt or len(txt) > 180:
-            continue
-        nn = nrm(txt)
-        for norm_lbl, canon in expected_map.items():
-            if nn.startswith(norm_lbl) and canon not in first:
-                first[canon] = el
-                break
+    
+    # on scanne AUSSI les textes nus après un tableau (cas "Prix de revient")
+    for node in soup.div.descendants:
+        if isinstance(node, NavigableString):
+            txt = (str(node) or "").strip()
+            if not txt or len(txt) > 180:
+                continue
+            nn = nrm(txt)
+            for norm_lbl, canon in expected_map.items():
+                if nn.startswith(norm_lbl) and canon not in first:
+                    # privilégier un conteneur bloc si possible
+                    holder = node.find_parent(["p","li","td","th"]) or node
+                    first[canon] = holder
+                    break
+        elif isinstance(node, Tag):
+            if node.name in ['h1','h2','h3','h4','h5','h6','p','li','strong','b','em','i','u','span','td','th']:
+                txt = node.get_text(" ", strip=True)
+                if not txt or len(txt) > 180:
+                    continue
+                nn = nrm(txt)
+                for norm_lbl, canon in expected_map.items():
+                    if nn.startswith(norm_lbl) and canon not in first:
+                        first[canon] = node
+                        break
 
     # 2) ordre imposé (Bonnes raisons : Fiducie devient #1 si Assurance absente)
     if section_key == 'bonnes_raisons_fr':
@@ -536,19 +551,23 @@ def fix_section_numbering(html: str, section_key: str) -> str:
                 continue
             break
 
-    def set_title(el: Tag, label_text: str, italic_underline: bool):
+    def set_title(el: Tag | NavigableString, label_text: str, italic_underline: bool):
         """
-        Déplace le *bloc titre d'origine* hors des listes (avant la liste racine), le réécrit
-        (italique+souligne), supprime le doublon dans la <li>, et neutralise les puces.
+        - Si le 'titre' est un texte nu (NavigableString), on le convertit en <p>.
+        - Si le titre est dans une <li>, on place le <p> final *avant la liste racine*,
+          on neutralise les puces/numéros et on nettoie la <li>.
+        - Sinon, on réécrit in situ.
         """
-        # si déjà placé juste avant, éviter le doublon
-        prev = el.find_previous_sibling("p")
-        if prev and _nrm_local(prev.get_text(" ", strip=True)).startswith(_nrm_local(label_text)):
-            return
-
-        li = el if el.name == "li" else el.find_parent("li")
+        # si le nœud est un texte nu, l'envelopper dans un <p> d'abord
+        if isinstance(el, NavigableString):
+            pwrap = soup.new_tag("p")
+            pwrap.string = str(el)
+            el.replace_with(pwrap)
+            el = pwrap  # on travaille désormais sur un Tag
+    
+        li = el if getattr(el, "name", None) == "li" else el.find_parent("li")
         if li:
-            # liste la plus proche + racine
+            # liste la plus proche et liste racine
             cur_list = li.find_parent(["ol","ul"])
             root_list = cur_list
             while True:
@@ -556,58 +575,67 @@ def fix_section_numbering(html: str, section_key: str) -> str:
                 plist = pli.find_parent(["ol","ul"]) if pli else None
                 if plist: root_list = plist
                 else: break
-
-            # neutraliser puces/numéros auto
+    
+            # couper les marqueurs auto (au cas où)
             for lst in filter(None, [cur_list, root_list]):
                 lst["data-noautonum"] = "1"
-
-            # migrer un <p> existant si possible, sinon créer un <p> propre
+    
+            # prendre un <p> existant si possible, sinon en créer un propre
             source_p = el.find_parent("p")
             if source_p:
                 source_p.extract()
                 target_p = source_p
             else:
                 target_p = soup.new_tag("p")
-
-            # nettoyer tout style résiduel
+    
+            # purge styles + marquage
             for attr in ("style","class","align"):
                 if attr in target_p.attrs:
                     del target_p[attr]
             target_p["data-fixed-title"] = "1"
-
-            # contenu italique + souligné
+    
+            # contenu: italique + souligné avec un <u> explicite
             target_p.clear()
             if italic_underline:
-                em = soup.new_tag("em")
-                u  = soup.new_tag("u")
-                u.string = label_text
-                em.append(u)
-                target_p.append(em)
+                em = soup.new_tag("em"); u = soup.new_tag("u"); u.string = label_text
+                em.append(u); target_p.append(em)
             else:
                 target_p.string = label_text
-
+    
             # insérer AVANT la liste racine (ou la plus proche)
             (root_list or cur_list or li).insert_before(target_p)
-
-            # enlever la/les lignes titre encore en tête de la <li>
-            canon = re.sub(r'^\s*\d+\.\s*', '', label_text).strip()
-            _remove_leading_label_from_li(li, _nrm_local(canon))
-
-            # supprimer la <li> si vide
+    
+            # enlever toute ligne-titre résiduelle en tête de la <li>
+            canon = re.sub(r'^\s*\d+\.\s*', '', label_text).strip().lower()
+            def _nrm_local(s: str) -> str:
+                s = re.sub(r'^\s*(?:[\(\[]?\d+(?:\.\d+)*[\)\.]?|[ivxlcdm]+[\)\.]|[A-Z]\)|•|–|—|-|\*)\s*', '', s or '', flags=re.I)
+                s = _strip_accents((s or "").lower()).replace("\u00A0"," ").strip()
+                return " ".join(s.split())
+            # boucle: supprimer tous les premiers nœuds qui commencent par le label
+            while True:
+                first_child = None
+                for c in li.children:
+                    if isinstance(c, NavigableString) and not str(c).strip():
+                        c.extract(); continue
+                    first_child = c; break
+                if first_child is None: break
+                t = (first_child.get_text(" ", strip=True) if hasattr(first_child,"get_text") else str(first_child)).strip()
+                if t and _nrm_local(t).startswith(_nrm_local(canon)):
+                    first_child.decompose(); continue
+                break
+    
             if not (li.get_text(strip=True) or li.find(True)):
                 li.decompose()
             return
-
-        # Pas dans une liste : réécriture in-situ
+    
+        # Pas dans une liste : réécriture in situ
         el.clear()
+        for attr in ("style","class","align"):
+            if attr in el.attrs: del el[attr]
         el["data-fixed-title"] = "1"
         if italic_underline:
-            em = soup.new_tag("em")
-            span = soup.new_tag("span")
-            span["style"] = "text-decoration: underline;"
-            span.string = label_text
-            em.append(span)
-            el.append(em)
+            em = soup.new_tag("em"); u = soup.new_tag("u"); u.string = label_text
+            em.append(u); el.append(em)
         else:
             el.string = label_text
 
