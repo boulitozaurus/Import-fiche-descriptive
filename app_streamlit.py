@@ -103,23 +103,6 @@ KEYWORD_TO_WH = {
 }
 
 # ================= FONCTIONS UTILITAIRES =================
-def ensure_prix_de_revient_header(html: str) -> str:
-    """
-    Si '1. Prix de revient' n'est pas visible dans le HTML final,
-    on le préfixe en <p><em><u>...</u></em></p>. On protège aussi
-    contre une éventuelle ligne 'Prix de revient' orpheline.
-    """
-    if not re.search(r'(?:^|>)\s*1\.\s*prix\s*de\s*reven[ti]\b', html, flags=re.I):
-        html = "<p data-fixed-title='1'><em><u>1. Prix de revient</u></em></p>" + html
-
-    # Retirer une éventuelle ligne orpheline 'Prix de revient' sans numéro
-    html = re.sub(
-        r'<(?:p|span|em|u|strong|a)[^>]*>\s*prix\s*de\s*reven[ti]\s*</(?:p|span|em|u|strong|a)>\s*',
-        '',
-        html,
-        flags=re.I
-    )
-    return html
         
 def _strip_accents(x: str) -> str:
     if x is None: return ""
@@ -446,6 +429,114 @@ def prepare_section_html(html: str):
     cleaned = re.sub(r"(?is)le contenu\s+g[éè]n[éè]r[éè]\s+par l[''' ]?ia\s+peut\s+être\s+incorrect\.?", '', cleaned)
 
     return cleaned, downloads
+
+def force_budget_structure(html: str) -> str:
+    """
+    Reconstruit Budget de manière déterministe :
+      - laisse les tableaux (KPI) éventuels en tête
+      - insère 1. Prix de revient APRES ces tableaux (toujours <em><u>…</u></em>)
+      - découpe le reste autour des ancres 2/3/4/5 si elles existent
+      - ne réinjecte pas les lignes-titre résiduelles (pas de doublons)
+    """
+    if not html or not html.strip():
+        return "<p data-fixed-title='1'><em><u>1. Prix de revient</u></em></p>"
+
+    import re, unicodedata
+    from bs4 import BeautifulSoup, NavigableString
+
+    def _strip_acc(s: str) -> str:
+        return "".join(ch for ch in unicodedata.normalize("NFKD", s or "") if not unicodedata.combining(ch))
+
+    def nrm(s: str) -> str:
+        s = (s or "").replace("\u00A0"," ")
+        s = s.translate(str.maketrans({"’":"'","‘":"'", "“":'"',"”":'"', "–":"-","—":"-","−":"-"}))
+        s = re.sub(r"\s+", " ", s).strip()
+        s = _strip_acc(s).lower().rstrip(" :")
+        s = re.sub(r'^\s*(?:\d+[\.\)]\s*)', '', s)  # retire un "2." éventuel
+        return s
+
+    ANCHORS = [
+        ("Financement et ratios", {"financement et ratios"}),
+        ("Revenus et marges",     {"revenus et marges"}),
+        ("Couverture des intérêts", {
+            "couverture des interets", "couvertures des interets",
+            "couverture des intérêts", "couvertures des intérêts"
+        }),
+        ("Stress test",           {"stress test"}),
+    ]
+    anchor_keys = set().union(*[keys for _, keys in ANCHORS])
+
+    soup = BeautifulSoup(f"<div>{html}</div>", "html.parser")
+    children = [el for el in soup.div.children
+                if (getattr(el, "name", None) is not None) or
+                   (isinstance(el, NavigableString) and str(el).strip())]
+
+    # 1) Détacher les tableaux/figures initiaux
+    lead_tables, rest_start = [], 0
+    for i, el in enumerate(children):
+        tag = getattr(el, "name", None)
+        if tag in {"table","figure"} or (tag == "p" and el.find("table") is not None):
+            lead_tables.append(el); rest_start = i+1; continue
+        break
+    work = children[rest_start:]
+
+    # 2) Repérer les ancres dans work (égalité stricte normalisée)
+    def node_text(el):
+        return (el.get_text(" ", strip=True) if hasattr(el, "get_text") else str(el)).strip()
+
+    def anchor_of(el):
+        t = nrm(node_text(el))
+        for title, keys in ANCHORS:
+            if t in keys:
+                return title
+        return None
+
+    anchor_pos = {}
+    for idx, el in enumerate(work):
+        t = anchor_of(el)
+        if t and t not in anchor_pos:
+            anchor_pos[t] = idx
+
+    ordered = [t for t,_ in ANCHORS if t in anchor_pos]
+    ordered.sort(key=lambda t: anchor_pos[t])
+
+    # 3) Tranches : tout avant la 1ʳᵉ ancre = Prix de revient
+    slices = []
+    if ordered:
+        first_pos = anchor_pos[ordered[0]]
+        slices.append(("Prix de revient", work[:first_pos]))
+        for j, title in enumerate(ordered):
+            p = anchor_pos[title]
+            q = anchor_pos[ordered[j+1]] if j+1 < len(ordered) else len(work)
+            slices.append((title, work[p+1:q]))  # saute la ligne-ancre elle-même
+    else:
+        slices.append(("Prix de revient", work))
+
+    # 4) Assembler : KPI -> 1. Prix de revient -> 2/3/4/5 sans réinjecter les titres bruts
+    out = []
+    out.extend(str(el) for el in lead_tables)
+
+    def is_pure_title(el):
+        t = nrm(node_text(el))
+        return (t in anchor_keys) or (t == nrm("Prix de revient"))
+
+    num = {"Prix de revient":1,"Financement et ratios":2,"Revenus et marges":3,"Couverture des intérêts":4,"Stress test":5}
+    for title, chunk in slices:
+        if title not in num: continue
+        out.append(f"<p data-fixed-title='1'><em><u>{num[title]}. {title}</u></em></p>")
+        for el in chunk:
+            if is_pure_title(el):  # évite les doublons
+                continue
+            out.append(str(el))
+
+    # 5) Nettoyage d'une éventuelle ligne 'Prix de revient' orpheline
+    res = "".join(out)
+    res = re.sub(
+        r'<(?:p|span|em|u|strong|a)[^>]*>\s*prix\s*de\s*reven[ti]\s*</(?:p|span|em|u|strong|a)>\s*',
+        '',
+        res, flags=re.I
+    )
+    return res
 
 # ================= CORRECTION DE LA NUMÉROTATION =================
 
@@ -826,12 +917,13 @@ if uploaded is not None:
         if key == "description_fr":
             raw_html = strip_leading_title_block(raw_html)
         clean_html, dls = prepare_section_html(raw_html)
-        dlmap = {uid: (fname, data, ctype) for uid, fname, data, ctype in dls}
-
-        if key == "budget_fr":
-            clean_html = ensure_prix_de_revient_header(clean_html)
         
-        st.markdown(clean_html, unsafe_allow_html=True)
+        if key == "budget_fr":
+            clean_html = force_budget_structure(clean_html)
+        
+        st.markdown(f"<div class='sect'>{clean_html}</div>", unsafe_allow_html=True)
+        
+        dlmap = {uid: (fname, data, ctype) for uid, fname, data, ctype in dls}
         
         parts = re.split(r'<!--DL:([0-9a-f]+)-->', clean_html, flags=re.I)
         
