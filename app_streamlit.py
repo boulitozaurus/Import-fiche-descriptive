@@ -471,13 +471,43 @@ def force_budget_structure(html: str) -> str:
                 if (getattr(el, "name", None) is not None) or
                    (isinstance(el, NavigableString) and str(el).strip())]
 
-    # 1) Détacher les tableaux/figures initiaux
-    lead_tables, rest_start = [], 0
+    # 1) Détacher le "cluster KPI" placé en tête : tableaux + éventuelle légende juste avant
+    lead_blocks, rest_start = [], 0
+    
+    def _is_sig(el):
+        return getattr(el, "name", None) is not None or (isinstance(el, NavigableString) and str(el).strip())
+    
+    def _next_sig(idx):
+        for j in range(idx + 1, len(children)):
+            ej = children[j]
+            if _is_sig(ej):
+                return ej
+        return None
+    
     for i, el in enumerate(children):
-        tag = getattr(el, "name", None)
-        if tag in {"table","figure"} or (tag == "p" and el.find("table") is not None):
-            lead_tables.append(el); rest_start = i+1; continue
+        name = getattr(el, "name", None)
+    
+        # cas 1 : tableau/figure ou <p> qui contient directement un tableau
+        if name in {"table", "figure"} or (name == "p" and el.find("table") is not None):
+            lead_blocks.append(el)
+            rest_start = i + 1
+            continue
+    
+        # cas 2 : légende courte juste avant un tableau/figure
+        if name == "p":
+            txt = (el.get_text(" ", strip=True) or "")
+            # légende courte, pas de ponctuation finale forte
+            if txt and len(txt) <= 150 and not re.search(r"[\.!?]$", txt):
+                nxt = _next_sig(i)
+                nxt_name = getattr(nxt, "name", None)
+                if nxt_name in {"table", "figure"} or (nxt_name == "p" and nxt and nxt.find("table") is not None):
+                    lead_blocks.append(el)
+                    rest_start = i + 1
+                    continue
+    
+        # sinon on s'arrête : le "cluster KPI" est fini
         break
+    
     work = children[rest_start:]
 
     # 2) Repérer les ancres dans work (égalité stricte normalisée)
