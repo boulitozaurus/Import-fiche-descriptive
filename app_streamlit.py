@@ -103,7 +103,24 @@ KEYWORD_TO_WH = {
 }
 
 # ================= FONCTIONS UTILITAIRES =================
+def ensure_prix_de_revient_header(html: str) -> str:
+    """
+    Si '1. Prix de revient' n'est pas visible dans le HTML final,
+    on le préfixe en <p><em><u>...</u></em></p>. On protège aussi
+    contre une éventuelle ligne 'Prix de revient' orpheline.
+    """
+    if not re.search(r'(?:^|>)\s*1\.\s*prix\s*de\s*reven[ti]\b', html, flags=re.I):
+        html = "<p data-fixed-title='1'><em><u>1. Prix de revient</u></em></p>" + html
 
+    # Retirer une éventuelle ligne orpheline 'Prix de revient' sans numéro
+    html = re.sub(
+        r'<(?:p|span|em|u|strong|a)[^>]*>\s*prix\s*de\s*reven[ti]\s*</(?:p|span|em|u|strong|a)>\s*',
+        '',
+        html,
+        flags=re.I
+    )
+    return html
+        
 def _strip_accents(x: str) -> str:
     if x is None: return ""
     try:
@@ -810,6 +827,11 @@ if uploaded is not None:
             raw_html = strip_leading_title_block(raw_html)
         clean_html, dls = prepare_section_html(raw_html)
         dlmap = {uid: (fname, data, ctype) for uid, fname, data, ctype in dls}
+
+        if key == "budget_fr":
+            clean_html = ensure_prix_de_revient_header(clean_html)
+        
+        st.markdown(clean_html, unsafe_allow_html=True)
         
         parts = re.split(r'<!--DL:([0-9a-f]+)-->', clean_html, flags=re.I)
         
