@@ -471,6 +471,25 @@ def force_budget_structure(html: str) -> str:
                 if (getattr(el, "name", None) is not None) or
                    (isinstance(el, NavigableString) and str(el).strip())]
 
+    # -- Supprimer tout 'Prix de revient' résiduel placé en tête (avec ou sans numéro) --
+    def _txt(el):
+        return (el.get_text(" ", strip=True) if hasattr(el, "get_text") else str(el)).strip()
+    
+    def _is_head_prix_de_revient(el):
+        if getattr(el, "name", None) != "p":
+            return False
+        t = nrm(_txt(el))
+        return t == nrm("prix de revient") or t == nrm("1. prix de revient")
+    
+    drop = 0
+    for i, el in enumerate(children):
+        if _is_head_prix_de_revient(el):
+            drop += 1
+            continue
+        break
+    if drop:
+        children = children[drop:]
+
     # 1) Détacher le "cluster KPI" placé en tête : tableaux + éventuelle légende juste avant
     lead_blocks, rest_start = [], 0
     
