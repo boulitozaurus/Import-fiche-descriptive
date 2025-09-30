@@ -686,9 +686,15 @@ def inject_css():
       .sect ol { list-style-type: decimal; }
       .sect ul { list-style-type: disc; }
       .sect ul[data-noautonum="1"] { list-style: none; padding-left: 0; margin-left: 0; }
-      .sect ul[data-noautonum="1"] > li { margin-left: 0; 
+      .sect ul[data-noautonum="1"] > li { margin-left: 0; }
       .sect ol[data-noautonum="1"] { list-style: none; padding-left: 0; margin-left: 0; }
       .sect ol[data-noautonum="1"] > li { margin-left: 0; }
+      .sect p:has(+ ol[data-noautonum="1"]),
+      .sect p:has(+ ul[data-noautonum="1"]) {
+        text-decoration: underline !important;
+        text-underline-offset: 2px;
+        text-decoration-thickness: from-font;
+      }
     </style>
     """, unsafe_allow_html=True)
 
