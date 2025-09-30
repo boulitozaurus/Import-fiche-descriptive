@@ -662,7 +662,7 @@ def inject_css():
       }
       .sect p[data-fixed-title="1"]{
       /* indentation uniforme pour tous les titres forcés */
-        margin-left: 3rem !important;   /* même recul que tes listes */
+        margin-left: 2.8rem !important;   /* même recul que tes listes */
         padding-left: 0 !important;
         text-indent: 0 !important;
         margin-top: .30rem;
