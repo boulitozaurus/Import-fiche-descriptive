@@ -802,35 +802,27 @@ def inject_css():
     st.markdown("""
     <style>
       .sect h1, .sect h2, .sect h3 {
-        font-size: 1.15rem;
-        line-height: 1.5;
-        font-weight: 600;
-        margin: .35rem 0 .35rem;
+        font-size: 1.15rem; line-height: 1.5; font-weight: 600; margin: .35rem 0;
       }
       .sect h4, .sect h5, .sect h6 {
-        font-size: 1.05rem;
-        line-height: 1.45;
-        font-weight: 600;
-        margin: .30rem 0 .30rem;
+        font-size: 1.05rem; line-height: 1.45; font-weight: 600; margin: .30rem 0;
       }
+
+      /* titres “fixés” (facultatif : indentation visuelle) */
       .sect p[data-fixed-title="1"]{
-      /* indentation uniforme pour tous les titres forcés */
-        margin-left: 1.4rem !important;   /* même recul que tes listes */
-        padding-left: 0 !important;
-        text-indent: 0 !important;
-        margin-top: .30rem;
-        margin-bottom: .30rem;
+        margin-left: 1.4rem !important; padding-left: 0 !important; text-indent: 0 !important;
+        margin-top: .30rem; margin-bottom: .30rem;
       }
-      .sect ol { list-style: none !important; margin-left: 0 !important; padding-left: 0 !important; }
-      .sect ol > li { margin-left: 0 !important; }
-      .sect p { margin: .30rem 0; }
+
+      /* styles par défaut des listes (laisse la numérotation normale partout) */
+      .sect p{ margin:.30rem 0; }
       .sect ol, .sect ul { margin: .40rem 0 .60rem 1.4rem; padding-left: 1.2rem; list-style-position: outside; }
       .sect ol { list-style-type: decimal; }
       .sect ul { list-style-type: disc; }
-      .sect ul[data-noautonum="1"] { list-style: none; padding-left: 0; margin-left: 0; }
-      .sect ul[data-noautonum="1"] > li { margin-left: 0; }
-      .sect ol[data-noautonum="1"] { list-style: none; padding-left: 0; margin-left: 0; }
-      .sect ol[data-noautonum="1"] > li { margin-left: 0; }
+
+      /* ❗️Neutraliser UNIQUEMENT les listes marquées par notre code */
+      .sect ol[data-noautonum="1"], .sect ul[data-noautonum="1"] { list-style: none; padding-left: 0; margin-left: 0; }
+      .sect ol[data-noautonum="1"] > li, .sect ul[data-noautonum="1"] > li { margin-left: 0; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -920,11 +912,8 @@ if uploaded is not None:
         
         if key == "budget_fr":
             clean_html = force_budget_structure(clean_html)
-        
-        st.markdown(f"<div class='sect'>{clean_html}</div>", unsafe_allow_html=True)
-        
+                
         dlmap = {uid: (fname, data, ctype) for uid, fname, data, ctype in dls}
-        
         parts = re.split(r'<!--DL:([0-9a-f]+)-->', clean_html, flags=re.I)
         
         st.subheader(label)
