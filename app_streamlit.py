@@ -434,17 +434,17 @@ def prepare_section_html(html: str):
 
 def fix_section_numbering(html: str, section_key: str) -> str:
     """
-    Forçage strict des titres:
-      - Facteurs de risque: 1) Risque lié au projet  2) Risque lié au secteur  3) Risque de défaut
-      - Bonnes raisons:     1) Assurance 100%  2) Fiducie-sûreté (passe #1 si Assurance absente)
-      - Budget:             1) Prix de revient  2) Financement et ratios  3) Revenus et marges
-                            4) Couverture des intérêts  5) Stress test (uniquement s'il existe)
-    Points clés:
-      * capte aussi les « textes nus » (NavigableString) — cas "Prix de revient" après un tableau
-      * déplace le bloc titre hors de la liste "racine" => plus d'indentation parasite
-      * supprime tous les doublons du libellé à l'intérieur de la <li> (ex. "Fiducie" répété)
-      * soulignement uniquement pour Budget (via <em><u>…</u></em>)
-      * coupe toute numérotation automatique (<ol>) dans ces sections
+    Forçage strict :
+      - Facteurs de risque : 1) Risque lié au projet  2) Risque lié au secteur  3) Risque de défaut
+      - Bonnes raisons     : 1) Assurance 100%       2) Fiducie-sûreté (devient #1 si Assurance absente)
+      - Budget             : 1) Prix de revient      2) Financement et ratios  3) Revenus et marges
+                             4) Couverture des intérêts  5) Stress test (si présent)
+    Points clés :
+      * détecte aussi les TEXTES NUS (cas “Prix de revient” après un tableau)
+      * déplace le bloc titre hors de la liste racine (pas d’indentation parasite)
+      * supprime toutes les occurrences doublons du libellé dans la <li> (ex. Fiducie qui se répète)
+      * soulignement UNIQUEMENT pour Budget (via <em><u>…</u></em>)
+      * coupe toute numérotation auto dans ces 3 sections
     """
     if not html or not html.strip():
         return html
@@ -472,41 +472,38 @@ def fix_section_numbering(html: str, section_key: str) -> str:
     if section_key not in EXPECTED:
         return html
 
-    # --- normalisations ---
+    # -------- normalisations --------
     def nrm(s: str) -> str:
         s = re.sub(r'^\s*(?:[\(\[]?\d+(?:\.\d+)*[\)\.]?|[ivxlcdm]+[\)\.]|[A-Z]\)|•|–|—|-|\*)\s*', '', s or '', flags=re.I)
         s = _strip_accents((s or "").lower()).replace("\u00A0"," ").strip()
         s = s.replace(" d’"," d'").replace(" l’"," l'")
         return " ".join(s.split())
 
-    def _nrm_local(s: str) -> str:
-        s = re.sub(r'^\s*(?:[\(\[]?\d+(?:\.\d+)*[\)\.]?|[ivxlcdm]+[\)\.]|[A-Z]\)|•|–|—|-|\*)\s*', '', s or '', flags=re.I)
-        s = _strip_accents((s or "").lower()).replace("\u00A0", " ").strip()
-        s = s.replace(" d’"," d'").replace(" l’"," l'")
-        return " ".join(s.split())
+    def nrm_loose(s: str) -> str:
+        return nrm(s).rstrip(" :")
 
     expected = list(EXPECTED[section_key])
-    expected_map = { nrm(lbl): lbl for lbl in expected }
+    expected_map = { nrm_loose(lbl): lbl for lbl in expected }
 
     # variantes tolérantes
     if section_key == 'budget_fr':
-        expected_map[nrm("Couvertures des intérêts")] = "Couverture des intérêts"
-        expected_map[nrm("couverture des interets")]  = "Couverture des intérêts"
-        expected_map[nrm("couvertures des interets")] = "Couverture des intérêts"
+        expected_map[nrm_loose("Couvertures des intérêts")] = "Couverture des intérêts"
+        expected_map[nrm_loose("couverture des interets")]  = "Couverture des intérêts"
+        expected_map[nrm_loose("couvertures des interets")] = "Couverture des intérêts"
     if section_key == 'bonnes_raisons_fr':
-        expected_map[nrm("Une fiducie surete sur l actif")] = "Une fiducie-sûreté sur l'actif"
-        expected_map[nrm("Une fiducie surete sur l'actif")] = "Une fiducie-sûreté sur l'actif"
+        expected_map[nrm_loose("Une fiducie surete sur l actif")] = "Une fiducie-sûreté sur l'actif"
+        expected_map[nrm_loose("Une fiducie surete sur l'actif")] = "Une fiducie-sûreté sur l'actif"
 
-    # --- 1) repérer la 1ʳᵉ occurrence de chaque libellé (y compris textes nus) ---
+    # -------- 1) repérer la 1ʳᵉ occurrence (y compris TEXTES NUS) --------
     first = {}
     for node in soup.div.descendants:
         if isinstance(node, NavigableString):
             txt = (str(node) or "").strip()
             if not txt or len(txt) > 180:
                 continue
-            nn = nrm(txt)
-            for norm_lbl, canon in expected_map.items():
-                if nn.startswith(norm_lbl) and canon not in first:
+            nn = nrm_loose(txt)
+            for k, canon in expected_map.items():
+                if nn.startswith(k) and canon not in first:
                     holder = node.find_parent(["p","li","td","th"]) or node
                     first[canon] = holder
                     break
@@ -514,13 +511,13 @@ def fix_section_numbering(html: str, section_key: str) -> str:
             txt = node.get_text(" ", strip=True)
             if not txt or len(txt) > 180:
                 continue
-            nn = nrm(txt)
-            for norm_lbl, canon in expected_map.items():
-                if nn.startswith(norm_lbl) and canon not in first:
+            nn = nrm_loose(txt)
+            for k, canon in expected_map.items():
+                if nn.startswith(k) and canon not in first:
                     first[canon] = node
                     break
 
-    # secours "Prix de revient" si introuvable (souvent texte nu après tableau)
+    # secours “Prix de revient” (texte nu après tableau, etc.)
     if section_key == 'budget_fr' and "Prix de revient" not in first:
         m = soup.find(string=re.compile(r'(?i)\bprix\s*de\s*reven[ti]\b'))
         if m:
@@ -530,7 +527,7 @@ def fix_section_numbering(html: str, section_key: str) -> str:
             soup.div.insert(0, p)
             first["Prix de revient"] = p
 
-    # --- 2) ordre imposé (et règle Fiducie #1 si Assurance absente) ---
+    # -------- 2) ordre imposé --------
     if section_key == 'bonnes_raisons_fr':
         if "Une assurance sur 100% du capital investi" not in first:
             expected = ["Une fiducie-sûreté sur l'actif"]
@@ -541,9 +538,12 @@ def fix_section_numbering(html: str, section_key: str) -> str:
     if section_key == 'budget_fr' and "Stress test" in first and "Stress test" not in order:
         order.append("Stress test")
 
-    # --- helpers nettoyage doublons dans <li> ---
-    def _remove_label_everywhere_in_li(li: Tag, label_norm: str):
-        # supprimer tous les enfants directs en tête qui répètent le label
+    # -------- helpers nettoyage <li> --------
+    def _nrm_local(s: str) -> str:
+        return nrm_loose(s)
+
+    def _clean_li_head(li: Tag, label_norm: str):
+        # supprime tous les 1ers enfants qui répètent le label
         while True:
             first_child = None
             for c in li.children:
@@ -555,15 +555,15 @@ def fix_section_numbering(html: str, section_key: str) -> str:
             if t and _nrm_local(t).startswith(label_norm):
                 first_child.decompose(); continue
             break
-        # supprimer aussi d'éventuels blocs aussitôt après
+        # et aussi les petits blocs directement au niveau racine de la li
         for c in list(li.find_all(["p","em","u","strong","b","span"], recursive=False)):
             t = c.get_text(" ", strip=True)
             if t and _nrm_local(t).startswith(label_norm):
                 c.decompose()
 
-    # --- migration / écriture du titre ---
+    # -------- migration / écriture du titre --------
     def set_title(el: Tag | NavigableString, label_text: str, italic_underline: bool):
-        # NavigableString -> enveloppe <p>
+        # Texte nu -> envelopper
         if isinstance(el, NavigableString):
             pwrap = soup.new_tag("p"); pwrap.string = str(el); el.replace_with(pwrap); el = pwrap
 
@@ -571,15 +571,15 @@ def fix_section_numbering(html: str, section_key: str) -> str:
 
         def _fill(node: Tag):
             node.clear()
-            node["data-fixed-title"] = "1"
-            if italic_underline:
+            node["data-fixed-title"] = "1"  # pour ta mise en page (indent éventuelle)
+            if italic_underline:           # <— Budget seulement
                 em = soup.new_tag("em"); u = soup.new_tag("u"); u.string = label_text
                 em.append(u); node.append(em)
             else:
                 node.string = label_text
 
         if li:
-            # liste la plus proche + racine
+            # liste proche + liste racine
             cur_list = li.find_parent(["ol","ul"])
             root_list = cur_list
             while True:
@@ -599,38 +599,36 @@ def fix_section_numbering(html: str, section_key: str) -> str:
             else:
                 tgt = soup.new_tag("p")
 
-            # insérer le titre AVANT la liste racine (alignement garanti)
+            # insérer AVANT la liste racine
             (root_list or cur_list or li).insert_before(tgt)
-            # nettoyer styles hérités
             for a in ("style","class","align"):
                 if a in tgt.attrs: del tgt[a]
             _fill(tgt)
 
-            # supprimer toutes les occurrences du label dans la <li>
+            # purger tout doublon dans la <li>
             label_norm = _nrm_local(re.sub(r'^\s*\d+\.\s*', '', label_text))
-            _remove_label_everywhere_in_li(li, label_norm)
+            _clean_li_head(li, label_norm)
 
             if not (li.get_text(strip=True) or li.find(True)):
                 li.decompose()
             return
 
-        # pas dans une liste : réécrire in situ + purge style
+        # pas dans une liste : réécrire in situ
         for a in ("style","class","align"):
             if a in el.attrs: del el[a]
         _fill(el)
 
-    # --- 3) appliquer la numérotation visible ---
+    # -------- 3) appliquer la numérotation visible --------
     for i, title in enumerate(order, 1):
         el = first[title]
         set_title(el, f"{i}. {title}", italic_underline=(section_key == 'budget_fr'))
 
-    # --- 4) plus de numérotation auto dans ces sections ---
+    # -------- 4) tuer la numérotation auto dans ces sections --------
     if section_key in ('budget_fr', 'points_attention_fr', 'bonnes_raisons_fr'):
         for ol in soup.find_all('ol'):
             ol['data-noautonum'] = '1'
 
     return soup.div.decode_contents()
-
 
 def apply_fixed_numbering(fr_payload: dict) -> dict:
     """Applique la numérotation fixe aux sections concernées."""
@@ -675,17 +673,9 @@ def inject_css():
       }
       .sect p[data-fixed-title="1"] em,
       .sect p[data-fixed-title="1"] u,
-      .sect p[data-fixed-title="1"] em > span {
-        text-decoration: underline !important;
-        text-underline-offset: 2px;
-        text-decoration-thickness: from-font;
-      }
+
       .sect p[data-fixed-title="1"],
-      .sect p[data-fixed-title="1"] * {
-        text-decoration: underline !important;
-        text-underline-offset: 2px;
-        text-decoration-thickness: from-font;
-      }
+
       .sect p[data-fixed-title="1"]{
       /* indentation uniforme pour tous les titres forcés */
         margin-left: 2.8rem !important;   /* même recul que tes listes */
