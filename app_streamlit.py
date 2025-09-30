@@ -543,7 +543,7 @@ def fix_section_numbering(html: str, section_key: str) -> str:
 
     # -------- helpers nettoyage <li> --------
     def _clean_li_head(li: Tag, label_norm: str):
-        # supprime tous les 1ers enfants qui répètent le label
+        # 1) supprimer tous les 1ers enfants qui répètent le label
         while True:
             first_child = None
             for c in li.children:
@@ -555,12 +555,13 @@ def fix_section_numbering(html: str, section_key: str) -> str:
             if t and nrm(t).startswith(label_norm):
                 first_child.decompose(); continue
             break
-        # et aussi les blocs (p/em/u/strong/b/span) racine de la li qui répètent le label
-        for c in list(li.find_all(["p","em","u","strong","b","span"], recursive=False)):
+    
+        # 2) supprimer les blocs en doublon (incluant <a>)
+        for c in list(li.find_all(["p","em","u","strong","b","span","a"], recursive=False)):
             t = c.get_text(" ", strip=True)
             if t and nrm(t).startswith(label_norm):
                 c.decompose()
-
+    
     # -------- migration / écriture du titre --------
     def set_title(el: Tag | NavigableString, label_text: str, underline: bool):
         # Texte nu -> envelopper en <p>
